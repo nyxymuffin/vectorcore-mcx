@@ -1,0 +1,14 @@
+[Unit]
+Description=VectorCore MCX Application Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/vectorcore/bin/mcxas -c /opt/vectorcore/etc/mcxas.yaml
+Restart=on-failure
+RestartSec=3
+WorkingDirectory=/opt/vectorcore
+
+[Install]
+WantedBy=multi-user.target

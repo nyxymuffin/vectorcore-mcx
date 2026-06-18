@@ -1,0 +1,52 @@
+api:
+  listen: ":8080"
+sip:
+  udp_listen: ":5060"
+  tcp_listen: ":5060"
+  advertise_host: "10.90.250.54"
+  advertise_port: 5060
+  transport: "udp"
+  record_route: true
+  options:
+    enabled: false
+    interval: "30s"
+cms:
+  enabled: true
+  listen: ":8100"
+  xcap_root: "http://10.90.250.54:8100/xcap-root"
+media:
+  enabled: true
+  listen_host: "0.0.0.0"
+  advertise_host: "10.90.250.54"
+  direction: "sendrecv" # sendrecv | recvonly | sendonly | inactive
+  audio_port: 40000
+  rtcp_port: 40001
+  floor_control_port: 40002
+  floor_auto_grant: true
+  floor_grant_duration_seconds: 30
+  log_packets: false
+  log_packet_interval: 100
+database:
+  driver: "sqlite" # sqlite | postgres
+  dsn: "/tmp/mcxas.db"
+  # dsn: "postgres://mcxas:mcxas@localhost:5432/mcxas?sslmode=disable"
+log:
+  file: "mcxas.log"
+  level: "info" # debug | info | warn | error
+ims:
+  mcc: "311"
+  mnc: "435"
+  realm: "ims.mnc435.mcc311.3gppnetwork.org"
+mcx:
+  sip_identity: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
+  server_name: "sip:mcptt-as.ims.mnc435.mcc311.3gppnetwork.org"
+  default_user_identity: "sip:mcptt-user@ims.mnc435.mcc311.3gppnetwork.org"
+  default_group_uri: "sip:mcptt-group@ims.mnc435.mcc311.3gppnetwork.org"
+  ue_xui_uri: "sip:311435300070581@ims.mnc435.mcc311.3gppnetwork.org"
+  ue_instance_id_urn: "urn:gsma:imei:356938035643809"
+  cms_uri: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
+  gms_uri: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
+  kms_uri: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
+  idms_auth_endpoint: "http://10.90.250.54:8080/idms/authorize"
+  idms_token_endpoint: "http://10.90.250.54:8080/idms/token"
+  http_proxy_uri: "http://10.90.250.54:8080"
