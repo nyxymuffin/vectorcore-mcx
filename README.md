@@ -1,6 +1,6 @@
 # VectorCore MCX
 
-`mcxas` is a Go-based MCX (MCPTT) IMS Application Server targeting MCOP SDK 3.0 and
+`mcxas` is a Go-based MCX IMS Application Server targeting MCOP SDK 3.0 and
 3GPP Release 13 MCPTT interoperability. It combines SIP call control,
 CMS/GMS XCAP services, MCPTT media observation and relay, persistence, and an
 OAM REST API/UI in one binary.
