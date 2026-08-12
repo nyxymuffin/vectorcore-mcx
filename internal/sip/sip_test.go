@@ -364,8 +364,29 @@ func TestXcapDiffBodyUsesRequestedSelectors(t *testing.T) {
 	}
 }
 
-func TestNotifyDialogRoutesReverseRecordRouteSetByDefault(t *testing.T) {
+// The dialog is created by an inbound SUBSCRIBE, so the AS is the UAS and the
+// route set is the Record-Route list taken in order (RFC 3261 §12.1.1); the
+// in-dialog NOTIFY reuses it unchanged. That gives the IMS terminating path
+// AS → S-CSCF → P-CSCF → UE, which is why "preserve" is the default.
+func TestNotifyDialogRoutesPreserveRecordRouteSetByDefault(t *testing.T) {
 	cfg := config.Default()
+	s := NewServer(cfg, nil)
+
+	routes := []string{
+		"<sip:mo@10.90.250.52;r2=on;lr=on;ftag=abc>",
+		"<sip:mo@10.90.250.52;transport=tcp;r2=on;lr=on;ftag=abc>",
+		"<sip:mo@10.90.250.50;lr=on;ftag=abc>",
+	}
+	got := s.notifyDialogRoutes(routes)
+	if strings.Join(got, "\n") != strings.Join(routes, "\n") {
+		t.Fatalf("notify routes = %#v, want preserved %#v", got, routes)
+	}
+}
+
+// "reverse" stays available as an override for non-standard deployments.
+func TestNotifyDialogRoutesCanReverseRecordRouteSet(t *testing.T) {
+	cfg := config.Default()
+	cfg.SIP.NotifyRouteSetOrder = "reverse"
 	s := NewServer(cfg, nil)
 
 	got := s.notifyDialogRoutes([]string{
@@ -379,23 +400,7 @@ func TestNotifyDialogRoutesReverseRecordRouteSetByDefault(t *testing.T) {
 		"<sip:mo@10.90.250.52;r2=on;lr=on;ftag=abc>",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("notify routes = %#v, want %#v", got, want)
-	}
-}
-
-func TestNotifyDialogRoutesCanPreserveRecordRouteSet(t *testing.T) {
-	cfg := config.Default()
-	cfg.SIP.NotifyRouteSetOrder = "preserve"
-	s := NewServer(cfg, nil)
-
-	routes := []string{
-		"<sip:mo@10.90.250.52;r2=on;lr=on;ftag=abc>",
-		"<sip:mo@10.90.250.52;transport=tcp;r2=on;lr=on;ftag=abc>",
-		"<sip:mo@10.90.250.50;lr=on;ftag=abc>",
-	}
-	got := s.notifyDialogRoutes(routes)
-	if strings.Join(got, "\n") != strings.Join(routes, "\n") {
-		t.Fatalf("notify routes = %#v, want preserved %#v", got, routes)
+		t.Fatalf("notify routes = %#v, want reversed %#v", got, want)
 	}
 }
 
