@@ -207,7 +207,22 @@ This seam is also where a P25 IWF profile would attach later — see §7.
 Execute one phase at a time and confirm before moving on. Exit criteria are stated so "done" is
 not a judgement call.
 
-### Phase 0 — Foundation (no spec work)
+### Phase 0 — Foundation (no spec work) — COMPLETE 2026-08-12
+
+Delivered across twelve commits. Suite went from one failing test to 97 passing,
+with `go build`, `go vet` and `gofmt` all clean. Two items were deliberately
+carried forward, both recorded below and in the commits that defer them:
+
+- **`go test -race` has never been run.** This machine has `CGO_ENABLED=0` and no
+  C toolchain, which the Windows race detector requires. Run it in a container
+  before trusting the concurrency work:
+  `docker run --rm -v B:\vectorcore-mcx:/src -w /src golang:1.25 go test ./... -race`
+- **Client transaction state machines and outbound retransmission (Timers A/E)
+  are not implemented.** Only the server half of the transaction layer landed.
+  The client half is exercised by the server-to-server work, so it belongs with
+  Phase 2a rather than here.
+
+Original scope, for reference:
 
 Everything in [AUDIT-2026-08-11.md](AUDIT-2026-08-11.md) that is prerequisite to touching the
 protocol layers: `.gitignore` plus purge of the committed binary and 8,629 `node_modules` files;
