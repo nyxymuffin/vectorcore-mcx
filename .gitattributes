@@ -1,0 +1,21 @@
+# Normalise line endings regardless of each developer's core.autocrlf setting.
+# Content is stored with LF, and the Go toolchain expects LF: without this a
+# CRLF checkout makes `gofmt -l` flag every file in the tree even when the
+# formatting itself is correct.
+* text=auto eol=lf
+
+# Shell scripts must keep LF or they will not execute on the target hosts.
+*.sh text eol=lf
+
+# Never convert binary or pre-built content.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.tar  binary
+*.gz   binary
+*.apk  binary
+*.pcap binary
+*.db   binary
