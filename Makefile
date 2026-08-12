@@ -1,13 +1,17 @@
 .PHONY: ui build test clean dev-ui all install uninstall
 
-BINARY  = mcxas
-VERSION = 0.0.1d
-PREFIX  = /opt/vectorcore
-BINDIR  = $(PREFIX)/bin
-ETCDIR  = $(PREFIX)/etc
-LOGDIR  = $(PREFIX)/log
-LOGFILE = $(PREFIX)/mcxas.log
-SYSTEMD = /lib/systemd/system/
+BINARY   = mcxas
+VERSION  = 0.0.1d
+PREFIX   = /opt/vectorcore
+BINDIR   = $(PREFIX)/bin
+ETCDIR   = $(PREFIX)/etc
+LOGDIR   = $(PREFIX)/log
+LOGFILE  = $(PREFIX)/mcxas.log
+SYSTEMD  = /lib/systemd/system/
+CONFSRC  = config/config.yaml
+# Unprivileged account the service runs as; see systemd/vectorcore-mcxas.service.
+SVCUSER  = vectorcore
+SVCGROUP = vectorcore
 
 all: ui build
 
@@ -29,16 +33,27 @@ dev-ui:
 clean:
 	rm -rf bin/ web/dist/
 
+# Requires root. Creates the unprivileged service account if absent, then
+# installs the binary, configuration and unit file under $(PREFIX). The
+# configuration may carry a database password so it is not world readable,
+# and the service account owns everything the daemon has to write.
 install: build
+	@getent group $(SVCGROUP) >/dev/null || groupadd --system $(SVCGROUP)
+	@getent passwd $(SVCUSER) >/dev/null || \
+		useradd --system --gid $(SVCGROUP) --home-dir $(PREFIX) \
+			--shell /usr/sbin/nologin --comment "VectorCore MCX" $(SVCUSER)
 	install -d $(BINDIR)
 	install -d $(ETCDIR)
 	install -d $(LOGDIR)
 	install -m755 bin/$(BINARY) $(BINDIR)/$(BINARY)
 	@if [ ! -f $(ETCDIR)/mcxas.yaml ]; then \
-		install -m644 config.yaml $(ETCDIR)/mcxas.yaml; \
+		install -m640 $(CONFSRC) $(ETCDIR)/mcxas.yaml; \
 	fi
 	touch $(LOGFILE)
-	chmod 644 $(LOGFILE)
+	chown -R $(SVCUSER):$(SVCGROUP) $(PREFIX)
+	chmod 750 $(PREFIX)
+	chmod 640 $(ETCDIR)/mcxas.yaml
+	chmod 640 $(LOGFILE)
 	install -d /lib/systemd/system
 	install -m644 systemd/vectorcore-mcxas.service $(SYSTEMD)/vectorcore-mcxas.service
 	systemctl daemon-reload

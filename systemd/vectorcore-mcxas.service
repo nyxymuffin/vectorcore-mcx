@@ -10,5 +10,44 @@ Restart=on-failure
 RestartSec=3
 WorkingDirectory=/opt/vectorcore
 
+# Run unprivileged. Every listener is above 1024 (SIP 5060, OAM 8080,
+# CMS 8100, media 40000-40002), so no capabilities are required at all.
+# This process parses unauthenticated network input, which is precisely
+# the workload that should not run as root.
+User=vectorcore
+Group=vectorcore
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+
+# Filesystem. The service writes only its own state directory: the SQLite
+# database and the log file, both relative to WorkingDirectory.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/vectorcore
+PrivateTmp=true
+PrivateDevices=true
+
+# Kernel and process isolation.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+
+# Only IP sockets are used. AF_UNIX is retained for journal logging.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
