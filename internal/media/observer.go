@@ -20,7 +20,7 @@ type Store interface {
 	ListCallsByGroup(context.Context, string) ([]store.MCPTTCall, error)
 	IncrementCallMedia(context.Context, string, string, int) error
 	UpdateCallRTPStats(context.Context, string, store.RTPStatsUpdate) error
-	UpdateCallFloorState(context.Context, string, store.FloorStateUpdate) error
+	UpdateCallFloorState(context.Context, string, store.FloorStateUpdate) (bool, error)
 }
 
 type Observer struct {
@@ -121,7 +121,7 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 			eventName := floorEventName(event.Subtype)
 			floorState := floorStateForEvent(event.Subtype, call.FloorState)
 			clearHolder := floorClearsHolder(floorState) && floorCanClearHolder(call, event.SSRC)
-			if err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
+			if _, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
 				State:       floorState,
 				Event:       eventName,
 				Subtype:     int(event.Subtype),
@@ -137,7 +137,7 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT floor idle send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
-					if err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
+					if _, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
 						State:       "idle",
 						Event:       floorEventName(mcpttFloorIdle),
 						Subtype:     mcpttFloorIdle,
@@ -155,7 +155,7 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT queue position send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
-					if err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
+					if _, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
 						State:   valueOr(call.FloorState, "queued"),
 						Event:   floorEventName(mcpttQueuePosition),
 						Subtype: mcpttQueuePosition,
@@ -169,12 +169,37 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				return
 			}
 			if event.Subtype == mcpttFloorRequest && o.cfg.Media.FloorAutoGrant && call.State != "terminated" && call.State != "cancelled" {
-				if !floorCanGrant(call, event.SSRC) {
+				// Claim the floor before announcing it. floorCanGrant decides
+				// from a snapshot read moments ago, so two requests from
+				// different SSRCs can both reach here believing the floor is
+				// free. The guarded update applies only while the holder is
+				// still what the decision assumed, so exactly one wins and the
+				// loser is denied rather than being granted a floor it does
+				// not hold.
+				granted := false
+				if floorCanGrant(call, event.SSRC) {
+					expected := call.FloorHolder
+					applied, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
+						State:        "granted",
+						Event:        floorEventName(mcpttFloorGranted),
+						Subtype:      mcpttFloorGranted,
+						SSRC:         event.SSRC,
+						Holder:       floorHolder(event.SSRC),
+						ExpectHolder: &expected,
+					})
+					if err != nil {
+						slog.Warn("MCPTT floor grant state update failed", "call_id", call.CallID, "remote", remoteText, "err", err)
+					} else if !applied {
+						slog.Info("MCPTT floor grant lost race", "call_id", call.CallID, "remote", remoteText, "expected_holder", expected)
+					}
+					granted = err == nil && applied
+				}
+				if !granted {
 					response := buildMCPTTFloorDeny(event.SSRC)
 					if _, err := pc.WriteTo(response, remote); err != nil {
 						slog.Warn("MCPTT floor deny send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 					} else {
-						if err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
+						if _, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
 							State:   valueOr(call.FloorState, "denied"),
 							Event:   floorEventName(mcpttFloorDeny),
 							Subtype: mcpttFloorDeny,
@@ -187,19 +212,11 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 					}
 					return
 				}
+				// The floor is now held in the store, so announce it.
 				response := buildMCPTTFloorGranted(event.SSRC, o.cfg.Media.FloorGrantDurationSeconds)
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT floor grant send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
-					if err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
-						State:   "granted",
-						Event:   floorEventName(mcpttFloorGranted),
-						Subtype: mcpttFloorGranted,
-						SSRC:    event.SSRC,
-						Holder:  floorHolder(event.SSRC),
-					}); err != nil {
-						slog.Warn("MCPTT floor grant state update failed", "call_id", call.CallID, "remote", remoteText, "err", err)
-					}
 					slog.Info("MCPTT floor granted", "call_id", call.CallID, "remote", remoteText, "duration", o.cfg.Media.FloorGrantDurationSeconds)
 				}
 			}

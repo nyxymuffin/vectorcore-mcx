@@ -79,7 +79,7 @@ func TestCallFloorStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = st.UpdateCallFloorState(ctx, "call-1", store.FloorStateUpdate{
+	_, err = st.UpdateCallFloorState(ctx, "call-1", store.FloorStateUpdate{
 		State:   "granted",
 		Event:   "granted",
 		Subtype: 1,
@@ -104,7 +104,7 @@ func TestCallFloorStateRoundTrip(t *testing.T) {
 		t.Fatalf("expected floor timestamps: %+v", call)
 	}
 
-	err = st.UpdateCallFloorState(ctx, "call-1", store.FloorStateUpdate{
+	_, err = st.UpdateCallFloorState(ctx, "call-1", store.FloorStateUpdate{
 		State:       "released",
 		Event:       "release",
 		Subtype:     4,

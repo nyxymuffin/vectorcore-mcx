@@ -397,7 +397,49 @@ FROM affiliations;
 			return err
 		}
 	}
+	if err := s.createIndexes(ctx); err != nil {
+		return err
+	}
 	return s.normaliseTimestamps(ctx)
+}
+
+// createIndexes adds the indexes the hot paths need. The schema previously had
+// none at all beyond the implicit ones behind UNIQUE constraints, so lookups
+// that run per media packet were full table scans.
+//
+// CREATE INDEX IF NOT EXISTS is understood by both SQLite and PostgreSQL, so
+// these need no dialect branch.
+func (s *Store) createIndexes(ctx context.Context) error {
+	indexes := []string{
+		// matchCall and relayRTP run these for every RTP, RTCP and floor
+		// packet, against a table whose rows carry ~60 columns.
+		`CREATE INDEX IF NOT EXISTS idx_mcptt_calls_group_uri ON mcptt_calls (group_uri)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcptt_calls_audio_ip ON mcptt_calls (audio_ip)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcptt_calls_updated_at ON mcptt_calls (updated_at)`,
+
+		// Dialog and subscription lookup by Call-ID on every in-dialog request.
+		`CREATE INDEX IF NOT EXISTS idx_dialogs_call_id ON dialogs (call_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_subscriptions_call_id ON subscriptions (call_id)`,
+
+		// The membership and affiliation pairs are unique on (user_id,
+		// group_id), which cannot serve a lookup by group alone.
+		`CREATE INDEX IF NOT EXISTS idx_group_memberships_group_id ON group_memberships (group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_group_affiliations_group_id ON group_affiliations (group_id)`,
+
+		// Expiry sweeps, which run every ten seconds.
+		`CREATE INDEX IF NOT EXISTS idx_group_affiliations_expires_at ON group_affiliations (expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcptt_registrations_expires_at ON mcptt_registrations (expires_at)`,
+
+		// XCAP documents are addressed by path on every CMS request.
+		`CREATE INDEX IF NOT EXISTS idx_cms_documents_path ON cms_documents (path)`,
+	}
+
+	for _, stmt := range indexes {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("create index: %w", err)
+		}
+	}
+	return nil
 }
 
 // orderedTimestampColumns are the TEXT timestamp columns that SQL compares or
@@ -1221,7 +1263,7 @@ WHERE call_id = ?`),
 	return err
 }
 
-func (s *Store) UpdateCallFloorState(ctx context.Context, callID string, update store.FloorStateUpdate) error {
+func (s *Store) UpdateCallFloorState(ctx context.Context, callID string, update store.FloorStateUpdate) (bool, error) {
 	if update.State == "" {
 		update.State = "unknown"
 	}
@@ -1250,8 +1292,26 @@ func (s *Store) UpdateCallFloorState(ctx context.Context, callID string, update 
 		args = append(args, formatTime(at))
 	}
 	args = append(args, callID)
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE mcptt_calls SET `+assignments+` WHERE call_id = ?`), args...)
-	return err
+	query := `UPDATE mcptt_calls SET ` + assignments + ` WHERE call_id = ?`
+	if update.ExpectHolder != nil {
+		// Compare-and-swap: apply only if the holder is still what the caller
+		// based its decision on.
+		query += ` AND floor_holder = ?`
+		args = append(args, *update.ExpectHolder)
+	}
+
+	res, err := s.db.ExecContext(ctx, s.q(query), args...)
+	if err != nil {
+		return false, err
+	}
+	if update.ExpectHolder == nil {
+		return true, nil
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 func (s *Store) CallSummary(ctx context.Context) (store.CallSummary, error) {

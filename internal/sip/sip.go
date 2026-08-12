@@ -736,7 +736,7 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		slog.Warn("store call failed", "err", err, "call_id", callID)
 	}
 	if sdpGrantsImplicitFloor(body) {
-		if err := s.st.UpdateCallFloorState(ctx, callID, store.FloorStateUpdate{
+		if _, err := s.st.UpdateCallFloorState(ctx, callID, store.FloorStateUpdate{
 			State:   "granted",
 			Event:   "sdp_granted",
 			Subtype: 1,

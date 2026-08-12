@@ -290,7 +290,7 @@ type Store interface {
 	UpdateCallState(context.Context, string, string) error
 	IncrementCallMedia(context.Context, string, string, int) error
 	UpdateCallRTPStats(context.Context, string, RTPStatsUpdate) error
-	UpdateCallFloorState(context.Context, string, FloorStateUpdate) error
+	UpdateCallFloorState(context.Context, string, FloorStateUpdate) (bool, error)
 	CallSummary(context.Context) (CallSummary, error)
 }
 
@@ -314,4 +314,13 @@ type FloorStateUpdate struct {
 	Holder      string
 	ClearHolder bool
 	At          time.Time
+
+	// ExpectHolder, when non-nil, makes the update conditional: the row is
+	// changed only if floor_holder still equals *ExpectHolder. A pointer to
+	// the empty string means "only if the floor is currently unheld".
+	//
+	// Floor arbitration decides from a snapshot read moments earlier, so two
+	// requests from different SSRCs can both conclude the floor is free. The
+	// guard turns the write into a compare-and-swap, letting exactly one win.
+	ExpectHolder *string
 }
