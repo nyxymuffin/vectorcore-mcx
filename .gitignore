@@ -1,6 +1,6 @@
 # Reference specification bundle: large, and third-party copyrighted
 # material (TIA / ETSI / 3GPP). Must never be committed.
-project-VectorCore-MCX/
+project-VectorCore-MCX*/
 
 # Build output
 bin/
