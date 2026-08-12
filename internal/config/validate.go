@@ -1,0 +1,167 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Validate reports whether the configuration is internally consistent and
+// usable.
+//
+// It runs after applyDefaults, so every field it inspects holds either an
+// explicit value or a default, and the enum fields have already been
+// lower-cased. That lets the checks below be strict rather than lenient.
+//
+// All problems are collected and returned together, so a malformed file can be
+// corrected in one pass instead of one startup attempt per mistake.
+func (c Config) Validate() error {
+	var problems []error
+	problems = append(problems, c.validateEnums()...)
+	problems = append(problems, c.validateListeners()...)
+	problems = append(problems, c.validateMediaPorts()...)
+	problems = append(problems, c.validateDurations()...)
+	return errors.Join(problems...)
+}
+
+// validateEnums checks the fields that accept a fixed vocabulary. Without this
+// a typo such as "sendrec" is silently accepted and then quietly ignored by
+// whichever component reads it.
+func (c Config) validateEnums() []error {
+	return []error{
+		oneOf("sip.transport", c.SIP.Transport, "udp", "tcp"),
+		oneOf("sip.notify_route_set_order", c.SIP.NotifyRouteSetOrder, "preserve", "reverse"),
+		oneOf("media.direction", c.Media.Direction, "sendrecv", "recvonly", "sendonly", "inactive"),
+		oneOf("database.driver", c.Database.Driver, "sqlite", "postgres", "postgresql"),
+		oneOf("log.level", c.Log.Level, "debug", "info", "warn", "warning", "error"),
+	}
+}
+
+// validateListeners checks that every bind address parses and carries a usable
+// port. Listen strings are validated even when their subsystem is disabled: a
+// malformed value is a mistake whether or not it is currently reached.
+func (c Config) validateListeners() []error {
+	listeners := []struct {
+		field string
+		addr  string
+	}{
+		{"api.listen", c.API.Listen},
+		{"cms.listen", c.CMS.Listen},
+		{"sip.udp_listen", c.SIP.UDPListen},
+		{"sip.tcp_listen", c.SIP.TCPListen},
+	}
+
+	var problems []error
+	for _, l := range listeners {
+		if err := validateListenAddr(l.field, l.addr); err != nil {
+			problems = append(problems, err)
+		}
+	}
+	if err := validatePort("sip.advertise_port", c.SIP.AdvertisePort); err != nil {
+		problems = append(problems, err)
+	}
+	return problems
+}
+
+// validateMediaPorts checks the three media listeners. They bind separate UDP
+// sockets, so their ports must differ.
+//
+// The collision is easy to hit by accident: rtcp_port defaults to
+// audio_port+1, so setting audio_port to 40001 derives an rtcp_port of 40002,
+// which is also the default floor_control_port.
+func (c Config) validateMediaPorts() []error {
+	if !c.Media.Enabled {
+		return nil
+	}
+
+	ports := []struct {
+		field string
+		port  int
+	}{
+		{"media.audio_port", c.Media.AudioPort},
+		{"media.rtcp_port", c.Media.RTCPPort},
+		{"media.floor_control_port", c.Media.FloorControlPort},
+	}
+
+	var problems []error
+	for _, p := range ports {
+		if err := validatePort(p.field, p.port); err != nil {
+			problems = append(problems, err)
+		}
+	}
+
+	seen := map[int]string{}
+	for _, p := range ports {
+		if other, duplicate := seen[p.port]; duplicate {
+			problems = append(problems, fmt.Errorf(
+				"media: %s and %s are both %d; the three media ports must differ",
+				other, p.field, p.port))
+			continue
+		}
+		seen[p.port] = p.field
+	}
+	return problems
+}
+
+// validateDurations checks the values that are parsed lazily elsewhere, so a
+// malformed one fails at startup rather than at first use.
+func (c Config) validateDurations() []error {
+	var problems []error
+
+	if c.SIP.Options.Enabled {
+		if _, err := time.ParseDuration(c.SIP.Options.Interval); err != nil {
+			problems = append(problems, fmt.Errorf(
+				"sip.options.interval: %q is not a valid duration (for example \"30s\")",
+				c.SIP.Options.Interval))
+		}
+	}
+
+	if c.Media.Enabled {
+		if c.Media.FloorGrantDurationSeconds < 0 {
+			problems = append(problems, fmt.Errorf(
+				"media.floor_grant_duration_seconds: %d must not be negative",
+				c.Media.FloorGrantDurationSeconds))
+		}
+		if c.Media.LogPackets && c.Media.LogPacketInterval < 1 {
+			problems = append(problems, fmt.Errorf(
+				"media.log_packet_interval: %d must be at least 1 when media.log_packets is enabled",
+				c.Media.LogPacketInterval))
+		}
+	}
+	return problems
+}
+
+// oneOf reports an error when value is outside the allowed vocabulary.
+func oneOf(field, value string, allowed ...string) error {
+	for _, a := range allowed {
+		if value == a {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: %q is not valid (want one of: %s)",
+		field, value, strings.Join(allowed, ", "))
+}
+
+// validateListenAddr accepts the host:port form used by net.Listen, including
+// the bare ":8080" shorthand.
+func validateListenAddr(field, addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s: %q is not a valid listen address (want host:port or :port)", field, addr)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("%s: %q has a non-numeric port %q", field, addr, port)
+	}
+	return validatePort(field, n)
+}
+
+func validatePort(field string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s: port %d is out of range (want 1-65535)", field, port)
+	}
+	return nil
+}

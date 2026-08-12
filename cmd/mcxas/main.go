@@ -48,6 +48,10 @@ func main() {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
 	}
+	if cfg.UsedDefaults {
+		slog.Warn("configuration file not found, using built-in defaults",
+			"path", *configPath, "advertise_host", cfg.SIP.AdvertiseHost, "realm", cfg.IMS.Realm)
+	}
 
 	st, err := openStore(cfg)
 	if err != nil {

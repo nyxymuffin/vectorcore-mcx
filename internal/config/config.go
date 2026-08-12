@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -18,6 +19,13 @@ type Config struct {
 	Log      LogConfig      `yaml:"log"`
 	IMS      IMSConfig      `yaml:"ims"`
 	MCX      MCXConfig      `yaml:"mcx"`
+
+	// UsedDefaults reports that the file named on the command line did not
+	// exist and the built-in defaults were used instead. Load treats that as
+	// success because it is the documented behaviour, but callers should
+	// surface it: a mistyped -c path otherwise starts a loopback server on a
+	// placeholder realm without saying so.
+	UsedDefaults bool `yaml:"-"`
 }
 
 type APIConfig struct {
@@ -96,6 +104,7 @@ func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			cfg.UsedDefaults = true
 			return cfg, nil
 		}
 		return cfg, err
@@ -153,6 +162,9 @@ func Load(path string) (Config, error) {
 		cfg.MCX.HTTPProxyURI = ""
 	}
 	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("invalid configuration in %s:\n%w", path, err)
+	}
 	return cfg, nil
 }
 
