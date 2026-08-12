@@ -1,24 +1,44 @@
+# VectorCore MCX example configuration.
+#
+# `make install` copies this file to /opt/vectorcore/etc/mcxas.yaml and the
+# service runs it as-is, so review every value before deploying. The addresses
+# below use the RFC 5737 documentation range and the reserved 3GPP test PLMN,
+# and are placeholders: they will not carry traffic anywhere.
+
 api:
   listen: ":8080"
+
 sip:
   udp_listen: ":5060"
   tcp_listen: ":5060"
-  advertise_host: "10.90.250.54"
+  # Address peers reach this server on. It is advertised in Contact and
+  # Record-Route, so it must be routable from both the UEs and the IMS core.
+  advertise_host: "192.0.2.10"
   advertise_port: 5060
-  transport: "udp"
+  transport: "udp" # udp | tcp
   record_route: true
+  # preserve keeps the learned IMS route order for in-dialog NOTIFY, giving
+  # AS -> S-CSCF -> P-CSCF -> UE. reverse is for non-standard deployments.
+  notify_route_set_order: "preserve" # preserve | reverse
   options:
     enabled: false
     interval: "30s"
+
 cms:
   enabled: true
   listen: ":8100"
-  xcap_root: "http://10.90.250.54:8100/xcap-root"
+  # Derived from sip.advertise_host and cms.listen when omitted.
+  # xcap_root: "http://192.0.2.10:8100/xcap-root"
+
 media:
   enabled: true
   listen_host: "0.0.0.0"
-  advertise_host: "10.90.250.54"
+  # Defaults to sip.advertise_host when omitted.
+  # advertise_host: "192.0.2.10"
   direction: "sendrecv" # sendrecv | recvonly | sendonly | inactive
+  # The three media ports must differ. Note rtcp_port defaults to
+  # audio_port + 1, so setting audio_port to 40001 would collide with the
+  # default floor_control_port.
   audio_port: 40000
   rtcp_port: 40001
   floor_control_port: 40002
@@ -26,27 +46,45 @@ media:
   floor_grant_duration_seconds: 30
   log_packets: false
   log_packet_interval: 100
+
 database:
-  driver: "sqlite" # sqlite | postgres
-  dsn: "/tmp/mcxas.db"
-  # dsn: "postgres://mcxas:mcxas@localhost:5432/mcxas?sslmode=disable"
+  driver: "sqlite" # sqlite | postgres | postgresql
+  # Relative to the working directory, which is /opt/vectorcore under the
+  # systemd unit. Do not place this under /tmp: the unit sets PrivateTmp, so
+  # the database would be discarded on every restart.
+  dsn: "mcxas.db"
+  # For PostgreSQL, do not commit a password to this file. Prefer peer/ident
+  # or client-certificate authentication, or a ~/.pgpass entry owned by the
+  # service account, and keep TLS verification on:
+  # driver: "postgres"
+  # dsn: "postgres://mcxas@db.example.net:5432/mcxas?sslmode=verify-full"
+
 log:
   file: "mcxas.log"
   level: "info" # debug | info | warn | error
+
 ims:
-  mcc: "311"
-  mnc: "435"
-  realm: "ims.mnc435.mcc311.3gppnetwork.org"
-mcx:
-  sip_identity: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
-  server_name: "sip:mcptt-as.ims.mnc435.mcc311.3gppnetwork.org"
-  default_user_identity: "sip:mcptt-user@ims.mnc435.mcc311.3gppnetwork.org"
-  default_group_uri: "sip:mcptt-group@ims.mnc435.mcc311.3gppnetwork.org"
-  ue_xui_uri: "sip:311435300070581@ims.mnc435.mcc311.3gppnetwork.org"
-  ue_instance_id_urn: "urn:gsma:imei:356938035643809"
-  cms_uri: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
-  gms_uri: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
-  kms_uri: "sip:mcptt-as@ims.mnc435.mcc311.3gppnetwork.org"
-  idms_auth_endpoint: "http://10.90.250.54:8080/idms/authorize"
-  idms_token_endpoint: "http://10.90.250.54:8080/idms/token"
-  http_proxy_uri: "http://10.90.250.54:8080"
+  # 001/01 is the reserved test PLMN. Replace with the operator's own values.
+  # ims.realm and every mcx.* identity are derived from these when unset, so
+  # changing the PLMN here is normally the only edit required.
+  mcc: "001"
+  mnc: "01"
+  # realm: "ims.mnc01.mcc001.3gppnetwork.org"
+
+# The mcx.* identities are all derived from ims.mcc, ims.mnc and
+# sip.advertise_host. Set them only to override that derivation, and revisit
+# them whenever the PLMN changes, otherwise they will silently go stale:
+#
+# mcx:
+#   sip_identity: "sip:mcptt-as@ims.mnc01.mcc001.3gppnetwork.org"
+#   server_name: "sip:mcptt-as.ims.mnc01.mcc001.3gppnetwork.org"
+#   default_user_identity: "sip:mcptt-user@ims.mnc01.mcc001.3gppnetwork.org"
+#   default_group_uri: "sip:mcptt-group@ims.mnc01.mcc001.3gppnetwork.org"
+#   ue_xui_uri: "sip:mcptt-user@ims.mnc01.mcc001.3gppnetwork.org"
+#   ue_instance_id_urn: "urn:uuid:00000000-0000-4000-8000-000000000001"
+#   cms_uri: "sip:mcptt-as@ims.mnc01.mcc001.3gppnetwork.org"
+#   gms_uri: "sip:mcptt-as@ims.mnc01.mcc001.3gppnetwork.org"
+#   kms_uri: "sip:mcptt-as@ims.mnc01.mcc001.3gppnetwork.org"
+#   idms_auth_endpoint: "http://192.0.2.10:8080/idms/authorize"
+#   idms_token_endpoint: "http://192.0.2.10:8080/idms/token"
+#   http_proxy_uri: "http://192.0.2.10:8080"

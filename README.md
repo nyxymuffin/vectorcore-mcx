@@ -157,7 +157,7 @@ and INVITE requests:
 ```
 
 Defaults are `127.0.0.1`, `5060`, and
-`ims.mnc435.mcc311.3gppnetwork.org`.
+`ims.mnc01.mcc001.3gppnetwork.org`.
 
 ## Installation
 

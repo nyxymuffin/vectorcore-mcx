@@ -3,10 +3,10 @@ set -euo pipefail
 
 host="${1:-127.0.0.1}"
 port="${2:-5060}"
-realm="${3:-ims.mnc435.mcc311.3gppnetwork.org}"
+realm="${3:-ims.mnc01.mcc001.3gppnetwork.org}"
 
 psi="sip:mcptt-as@${realm}"
-impu="sip:311435300070581@${realm}"
+impu="sip:001010000000001@${realm}"
 mcptt_id="sip:16752012881@${realm}"
 group="sip:DEMO_group@${realm}"
 
@@ -21,7 +21,7 @@ require nc
 require socat
 
 echo "== TCP OPTIONS =="
-printf 'OPTIONS %s SIP/2.0\r\nVia: SIP/2.0/TCP 10.90.250.50;branch=z9hG4bKtop\r\nVia: SIP/2.0/UDP 192.168.105.116:37457;branch=z9hG4bKue\r\nFrom: <%s>;tag=fromtcp\r\nTo: <%s>\r\nCall-ID: smoke-tcp-options\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' "$psi" "$impu" "$psi" \
+printf 'OPTIONS %s SIP/2.0\r\nVia: SIP/2.0/TCP 192.0.2.50;branch=z9hG4bKtop\r\nVia: SIP/2.0/UDP 198.51.100.116:37457;branch=z9hG4bKue\r\nFrom: <%s>;tag=fromtcp\r\nTo: <%s>\r\nCall-ID: smoke-tcp-options\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' "$psi" "$impu" "$psi" \
   | nc -w 2 "$host" "$port"
 
 echo
@@ -44,7 +44,7 @@ EOF
 
 echo
 echo "== TCP PUBLISH multipart =="
-printf 'PUBLISH %s SIP/2.0\r\nVia: SIP/2.0/TCP 10.90.250.50;branch=z9hG4bKpub\r\nFrom: <%s>;tag=frompub\r\nTo: <%s>\r\nCall-ID: smoke-publish\r\nCSeq: 1 PUBLISH\r\nEvent: poc-settings\r\nContent-Type: multipart/mixed;boundary=smoke\r\nContent-Length: %d\r\n\r\n%s' "$psi" "$impu" "$psi" "${#publish_body}" "$publish_body" \
+printf 'PUBLISH %s SIP/2.0\r\nVia: SIP/2.0/TCP 192.0.2.50;branch=z9hG4bKpub\r\nFrom: <%s>;tag=frompub\r\nTo: <%s>\r\nCall-ID: smoke-publish\r\nCSeq: 1 PUBLISH\r\nEvent: poc-settings\r\nContent-Type: multipart/mixed;boundary=smoke\r\nContent-Length: %d\r\n\r\n%s' "$psi" "$impu" "$psi" "${#publish_body}" "$publish_body" \
   | nc -w 2 "$host" "$port"
 
 invite_body=$(cat <<EOF
@@ -52,9 +52,9 @@ invite_body=$(cat <<EOF
 Content-Type: application/sdp
 
 v=0
-o=organization 1983 678901 IN IP4 192.168.105.116
+o=organization 1983 678901 IN IP4 198.51.100.116
 s=-
-c=IN IP4 192.168.105.116
+c=IN IP4 198.51.100.116
 t=0 0
 m=audio 37514 RTP/AVP 0
 a=sendrecv
@@ -70,5 +70,5 @@ EOF
 
 echo
 echo "== TCP INVITE multipart =="
-printf 'INVITE %s SIP/2.0\r\nRecord-Route: <sip:mo@10.90.250.50;lr=on>\r\nVia: SIP/2.0/TCP 10.90.250.50;branch=z9hG4bKinvtop\r\nVia: SIP/2.0/UDP 192.168.105.116:37457;branch=z9hG4bKinvue\r\nFrom: <%s>;tag=frominv\r\nTo: <%s>\r\nContact: <sip:311435300070581@192.168.105.116:37457;transport=udp>\r\nCall-ID: smoke-invite\r\nCSeq: 1 INVITE\r\nP-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mcptt\r\nContent-Type: multipart/mixed;boundary=invite\r\nContent-Length: %d\r\n\r\n%s' "$psi" "$impu" "$psi" "${#invite_body}" "$invite_body" \
+printf 'INVITE %s SIP/2.0\r\nRecord-Route: <sip:mo@192.0.2.50;lr=on>\r\nVia: SIP/2.0/TCP 192.0.2.50;branch=z9hG4bKinvtop\r\nVia: SIP/2.0/UDP 198.51.100.116:37457;branch=z9hG4bKinvue\r\nFrom: <%s>;tag=frominv\r\nTo: <%s>\r\nContact: <sip:001010000000001@198.51.100.116:37457;transport=udp>\r\nCall-ID: smoke-invite\r\nCSeq: 1 INVITE\r\nP-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mcptt\r\nContent-Type: multipart/mixed;boundary=invite\r\nContent-Length: %d\r\n\r\n%s' "$psi" "$impu" "$psi" "${#invite_body}" "$invite_body" \
   | nc -w 2 "$host" "$port"

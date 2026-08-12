@@ -467,7 +467,7 @@ func TestDefaultUEInitConfigAdvertisesGMSXCAPRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
-	cfg.CMS.XCAPRoot = "http://10.90.250.54:8100/xcap-root/"
+	cfg.CMS.XCAPRoot = "http://192.0.2.11:8100/xcap-root/"
 	s := NewServer(cfg, st)
 
 	body := s.defaultDocument(ctx, "/org.3gpp.mcptt.ue-init-config/users/mcptt_UE_id/mcptt_UE_id")
@@ -476,8 +476,8 @@ func TestDefaultUEInitConfigAdvertisesGMSXCAPRoot(t *testing.T) {
 		`XUI-URI="sip:mcptt-user@ims.example.test"`,
 		`<mcptt-UE-id index="0">`,
 		`<Instance-ID-URN>urn:uuid:00000000-0000-4000-8000-000000000001</Instance-ID-URN>`,
-		`<GMS-XCAP-root-URI>http://10.90.250.54:8100/xcap-root</GMS-XCAP-root-URI>`,
-		`<CMS-XCAP-root-URI>http://10.90.250.54:8100/xcap-root</CMS-XCAP-root-URI>`,
+		`<GMS-XCAP-root-URI>http://192.0.2.11:8100/xcap-root</GMS-XCAP-root-URI>`,
+		`<CMS-XCAP-root-URI>http://192.0.2.11:8100/xcap-root</CMS-XCAP-root-URI>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UE init config missing %q:\n%s", want, body)
@@ -497,7 +497,7 @@ func TestDefaultGMSGroupDocumentIsGeneratedForMCOPClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := st.CreateGroup(ctx, store.Group{URI: "sip:DEMO_group@ims.mnc435.mcc311.3gppnetwork.org", DisplayName: "DEMO Group", Enabled: true})
+	group, err := st.CreateGroup(ctx, store.Group{URI: "sip:DEMO_group@ims.mnc01.mcc001.3gppnetwork.org", DisplayName: "DEMO Group", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,10 +506,10 @@ func TestDefaultGMSGroupDocumentIsGeneratedForMCOPClient(t *testing.T) {
 	}
 
 	s := NewServer(config.Default(), st)
-	body := s.defaultDocument(ctx, "/org.openmobilealliance.groups/global/byGroup/sip:DEMO_group@ims.mnc435.mcc311.3gppnetwork.org")
+	body := s.defaultDocument(ctx, "/org.openmobilealliance.groups/global/byGroup/sip:DEMO_group@ims.mnc01.mcc001.3gppnetwork.org")
 	for _, want := range []string{
 		`<group xmlns="urn:oma:xml:poc:list-service"`,
-		`<list-service uri="sip:DEMO_group@ims.mnc435.mcc311.3gppnetwork.org">`,
+		`<list-service uri="sip:DEMO_group@ims.mnc01.mcc001.3gppnetwork.org">`,
 		`<display-name xml:lang="en">DEMO Group</display-name>`,
 		`<entry uri="sip:u@example.test">`,
 		`<participant-type>MCPTT User</participant-type>`,
@@ -538,7 +538,7 @@ func TestGMSGroupXCAPRequestReturnsGroupDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := st.CreateGroup(ctx, store.Group{URI: "sip:DEMO_group@ims.mnc435.mcc311.3gppnetwork.org", DisplayName: "DEMO Group", Enabled: true})
+	group, err := st.CreateGroup(ctx, store.Group{URI: "sip:DEMO_group@ims.mnc01.mcc001.3gppnetwork.org", DisplayName: "DEMO Group", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +547,7 @@ func TestGMSGroupXCAPRequestReturnsGroupDocument(t *testing.T) {
 	}
 
 	s := NewServer(config.Default(), st)
-	req := httptest.NewRequest(http.MethodGet, "/xcap-root/org.openmobilealliance.groups/global/byGroup/sip:DEMO_group@ims.mnc435.mcc311.3gppnetwork.org", nil)
+	req := httptest.NewRequest(http.MethodGet, "/xcap-root/org.openmobilealliance.groups/global/byGroup/sip:DEMO_group@ims.mnc01.mcc001.3gppnetwork.org", nil)
 	rr := httptest.NewRecorder()
 	s.handleXCAP(rr, req)
 
@@ -558,7 +558,7 @@ func TestGMSGroupXCAPRequestReturnsGroupDocument(t *testing.T) {
 	if got := rr.Header().Get("Content-Type"); got != "application/vnd.oma.poc.groups+xml" {
 		t.Fatalf("content-type = %q, want application/vnd.oma.poc.groups+xml", got)
 	}
-	if !strings.Contains(body, `<list-service uri="sip:DEMO_group@ims.mnc435.mcc311.3gppnetwork.org">`) {
+	if !strings.Contains(body, `<list-service uri="sip:DEMO_group@ims.mnc01.mcc001.3gppnetwork.org">`) {
 		t.Fatalf("HTTP GMS response did not contain group document:\n%s", body)
 	}
 }

@@ -67,7 +67,7 @@ mcx:
   default_user_identity: "sip:default-user@ims.custom.example"
   default_group_uri: "sip:default-group@ims.custom.example"
   ue_xui_uri: "sip:ue@ims.custom.example"
-  ue_instance_id_urn: "urn:gsma:imei:356938035643809"
+  ue_instance_id_urn: "urn:gsma:imei:000000000000000"
 `)
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ mcx:
 	if cfg.MCX.UEXUIURI != "sip:ue@ims.custom.example" {
 		t.Fatalf("UE XUI URI = %q, want explicit value", cfg.MCX.UEXUIURI)
 	}
-	if cfg.MCX.UEInstanceIDURN != "urn:gsma:imei:356938035643809" {
+	if cfg.MCX.UEInstanceIDURN != "urn:gsma:imei:000000000000000" {
 		t.Fatalf("UE instance ID URN = %q, want explicit value", cfg.MCX.UEInstanceIDURN)
 	}
 }
