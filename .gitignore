@@ -1,2 +1,16 @@
-project-VectorCore-MCXdks/*
-docs/*
+# Reference specification bundle: large, and third-party copyrighted
+# material (TIA / ETSI / 3GPP). Must never be committed.
+project-VectorCore-MCX/
+
+# Build output
+bin/
+web/node_modules/
+
+# Runtime artefacts
+*.db
+*.log
+
+# NOTE: web/dist is deliberately NOT ignored. web/embed.go declares
+# //go:embed all:dist, so the directory must exist for `go build` and
+# `go test ./...` to compile at all. Untracking it breaks a fresh clone
+# until `make ui` has been run.
