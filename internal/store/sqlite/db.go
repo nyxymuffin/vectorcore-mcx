@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -396,6 +397,79 @@ FROM affiliations;
 			return err
 		}
 	}
+	return s.normaliseTimestamps(ctx)
+}
+
+// orderedTimestampColumns are the TEXT timestamp columns that SQL compares or
+// orders directly, so their textual width has to be uniform. Columns that are
+// only read back into Go are not listed: parseTime accepts either width.
+var orderedTimestampColumns = map[string][]string{
+	"group_affiliations":  {"expires_at", "last_seen_at", "updated_at"},
+	"group_memberships":   {"updated_at"},
+	"mcptt_registrations": {"expires_at", "last_seen_at", "updated_at"},
+	"mcptt_calls":         {"updated_at"},
+	"dialogs":             {"updated_at"},
+}
+
+// normaliseTimestamps rewrites timestamps written by earlier versions, which
+// used time.RFC3339Nano and so produced a variable-width fractional second, to
+// the fixed-width layout. Without this, rows written before and after the
+// change compare incorrectly against each other.
+//
+// Rows already in the canonical form are left untouched, so this settles after
+// the first run.
+func (s *Store) normaliseTimestamps(ctx context.Context) error {
+	for table, columns := range orderedTimestampColumns {
+		for _, column := range columns {
+			if err := s.normaliseTimestampColumn(ctx, table, column); err != nil {
+				return fmt.Errorf("normalise %s.%s: %w", table, column, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) normaliseTimestampColumn(ctx context.Context, table, column string) error {
+	// table and column come from the map above, never from user input.
+	query := fmt.Sprintf("SELECT id, %s FROM %s WHERE %s != ''", column, table, column)
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		// The table may not exist yet on a fresh database.
+		return nil //nolint:nilerr // absent table is not an error here
+	}
+
+	type fix struct{ id, value string }
+	var fixes []fix
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return err
+		}
+		t := parseTime(raw)
+		if t.IsZero() {
+			continue
+		}
+		if canonical := formatTime(t); canonical != raw {
+			fixes = append(fixes, fix{id: id, value: canonical})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	if len(fixes) == 0 {
+		return nil
+	}
+	update := s.q(fmt.Sprintf("UPDATE %s SET %s = ? WHERE id = ?", table, column))
+	for _, f := range fixes {
+		if _, err := s.db.ExecContext(ctx, update, f.value, f.id); err != nil {
+			return err
+		}
+	}
+	slog.Info("normalised legacy timestamps", "table", table, "column", column, "rows", len(fixes))
 	return nil
 }
 
@@ -421,11 +495,20 @@ func parseTime(v string) time.Time {
 	return t
 }
 
+// timestampLayout is RFC 3339 with a fixed nine-digit fractional second.
+//
+// time.RFC3339Nano strips trailing zeros, so its output has variable width and
+// cannot be compared as text: ".5Z" sorts after ".55Z", because 'Z' (0x5A) is
+// greater than '5' (0x35), even though 0.5 precedes 0.55. Every timestamp
+// column here is TEXT, and several are compared or ordered directly in SQL, so
+// the width has to be constant.
+const timestampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 func formatTime(v time.Time) string {
 	if v.IsZero() {
 		return ""
 	}
-	return v.UTC().Format(time.RFC3339Nano)
+	return v.UTC().Format(timestampLayout)
 }
 
 func marshalStrings(v []string) string {
@@ -494,7 +577,7 @@ func (s *Store) GetUser(ctx context.Context, id string) (*store.User, error) {
 func (s *Store) CreateUser(ctx context.Context, v store.User) (store.User, error) {
 	v.ID, v.CreatedAt, v.UpdatedAt = stampNew(v.ID)
 	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO users (id, impi, impu, mcptt_id, display_name, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+		v.ID, v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -507,7 +590,7 @@ func (s *Store) UpdateUser(ctx context.Context, id string, v store.User) (*store
 	v.CreatedAt = current.CreatedAt
 	v.UpdatedAt = time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, s.q(`UPDATE users SET impi=?, impu=?, mcptt_id=?, display_name=?, enabled=?, updated_at=? WHERE id=?`),
-		v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), v.UpdatedAt.Format(time.RFC3339Nano), id)
+		v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 
@@ -556,7 +639,7 @@ func (s *Store) GetGroup(ctx context.Context, id string) (*store.Group, error) {
 func (s *Store) CreateGroup(ctx context.Context, v store.Group) (store.Group, error) {
 	v.ID, v.CreatedAt, v.UpdatedAt = stampNew(v.ID)
 	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO groups (id, uri, display_name, description, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+		v.ID, v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -569,7 +652,7 @@ func (s *Store) UpdateGroup(ctx context.Context, id string, v store.Group) (*sto
 	v.CreatedAt = current.CreatedAt
 	v.UpdatedAt = time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, s.q(`UPDATE groups SET uri=?, display_name=?, description=?, enabled=?, updated_at=? WHERE id=?`),
-		v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), v.UpdatedAt.Format(time.RFC3339Nano), id)
+		v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 
@@ -619,7 +702,7 @@ func (s *Store) CreateGroupMembership(ctx context.Context, v store.GroupMembersh
 	}
 	v.Role = role
 	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO group_memberships (id, user_id, group_id, role, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.UserID, v.GroupID, v.Role, v.Priority, v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+		v.ID, v.UserID, v.GroupID, v.Role, v.Priority, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -637,7 +720,7 @@ func (s *Store) UpdateGroupMembership(ctx context.Context, id string, v store.Gr
 	}
 	v.Role = role
 	_, err = s.db.ExecContext(ctx, s.q(`UPDATE group_memberships SET user_id=?, group_id=?, role=?, priority=?, updated_at=? WHERE id=?`),
-		v.UserID, v.GroupID, v.Role, v.Priority, v.UpdatedAt.Format(time.RFC3339Nano), id)
+		v.UserID, v.GroupID, v.Role, v.Priority, formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 
@@ -728,7 +811,7 @@ func (s *Store) CreateGroupAffiliation(ctx context.Context, v store.GroupAffilia
 		v.LastSeenAt = v.UpdatedAt
 	}
 	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO group_affiliations (id, user_id, group_id, state, source, expires_at, last_publish_call_id, last_seen_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.UserID, v.GroupID, v.State, v.Source, formatTime(v.ExpiresAt), v.LastPublishCallID, formatTime(v.LastSeenAt), v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+		v.ID, v.UserID, v.GroupID, v.State, v.Source, formatTime(v.ExpiresAt), v.LastPublishCallID, formatTime(v.LastSeenAt), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -754,7 +837,7 @@ func (s *Store) UpdateGroupAffiliation(ctx context.Context, id string, v store.G
 		v.LastSeenAt = v.UpdatedAt
 	}
 	_, err = s.db.ExecContext(ctx, s.q(`UPDATE group_affiliations SET user_id=?, group_id=?, state=?, source=?, expires_at=?, last_publish_call_id=?, last_seen_at=?, updated_at=? WHERE id=?`),
-		v.UserID, v.GroupID, v.State, v.Source, formatTime(v.ExpiresAt), v.LastPublishCallID, formatTime(v.LastSeenAt), v.UpdatedAt.Format(time.RFC3339Nano), id)
+		v.UserID, v.GroupID, v.State, v.Source, formatTime(v.ExpiresAt), v.LastPublishCallID, formatTime(v.LastSeenAt), formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 
@@ -766,7 +849,7 @@ func (s *Store) DeleteGroupAffiliation(ctx context.Context, id string) error {
 func (s *Store) IsGroupAffiliated(ctx context.Context, userID, groupID string) (bool, error) {
 	var id string
 	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM group_affiliations WHERE user_id = ? AND group_id = ? AND state = 'affiliated' AND (expires_at = '' OR expires_at > ?) LIMIT 1`),
-		userID, groupID, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&id)
+		userID, groupID, formatTime(time.Now().UTC())).Scan(&id)
 	if ok, err := notFound(err); ok || err != nil {
 		return false, err
 	}
@@ -822,7 +905,7 @@ func (s *Store) GetCMSDocumentByPath(ctx context.Context, path string) (*store.C
 func (s *Store) CreateCMSDocument(ctx context.Context, v store.CMSDocument) (store.CMSDocument, error) {
 	v.ID, v.CreatedAt, v.UpdatedAt = stampNew(v.ID)
 	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO cms_documents (id, name, auid, path, content_type, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.Name, v.AUID, v.Path, v.ContentType, v.Body, v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+		v.ID, v.Name, v.AUID, v.Path, v.ContentType, v.Body, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -835,7 +918,7 @@ func (s *Store) UpdateCMSDocument(ctx context.Context, id string, v store.CMSDoc
 	v.CreatedAt = current.CreatedAt
 	v.UpdatedAt = time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, s.q(`UPDATE cms_documents SET name=?, auid=?, path=?, content_type=?, body=?, updated_at=? WHERE id=?`),
-		v.Name, v.AUID, v.Path, v.ContentType, v.Body, v.UpdatedAt.Format(time.RFC3339Nano), id)
+		v.Name, v.AUID, v.Path, v.ContentType, v.Body, formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 
@@ -853,7 +936,7 @@ func (s *Store) UpsertPublishedState(ctx context.Context, v store.PublishedState
 	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO published_state (id, user_uri, event, body, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(user_uri, event) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at`),
-		v.ID, v.UserURI, v.Event, v.Body, v.UpdatedAt.Format(time.RFC3339Nano))
+		v.ID, v.UserURI, v.Event, v.Body, formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -866,7 +949,7 @@ func (s *Store) CreateSubscription(ctx context.Context, v store.Subscription) (s
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		v.ID, v.CallID, v.Event, v.SubscriberURI, v.TargetURI, v.LocalTag, v.RemoteTag,
 		v.RouteSet, v.RemoteTarget, v.Transport, v.SourceAddr, v.TopVia, v.State,
-		v.ExpiresAt.Format(time.RFC3339Nano), v.CreatedAt.Format(time.RFC3339Nano))
+		formatTime(v.ExpiresAt), formatTime(v.CreatedAt))
 	return v, err
 }
 
@@ -880,13 +963,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		v.ID, v.CallID, v.LocalTag, v.RemoteTag, v.FromURI, v.ToURI, v.RequestURI, v.IMPU, v.MCPTTID, v.Method, v.State,
 		v.RouteSet, v.RemoteTarget, boolInt(v.RecordRouteUsed), v.LocalCSeq, v.RemoteCSeq, v.LastMethod, v.LastStatus,
 		v.Transport, v.SourceAddr, v.TopVia,
-		v.CreatedAt.Format(time.RFC3339Nano), v.UpdatedAt.Format(time.RFC3339Nano))
+		formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
 func (s *Store) UpdateDialogState(ctx context.Context, callID, state string) error {
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE dialogs SET state = ?, updated_at = ? WHERE call_id = ?`),
-		state, time.Now().UTC().Format(time.RFC3339Nano), callID)
+		state, formatTime(time.Now().UTC()), callID)
 	return err
 }
 
@@ -1041,7 +1124,7 @@ FROM mcptt_calls WHERE group_uri = ? AND state NOT IN ('terminated', 'cancelled'
 }
 
 func (s *Store) SetUEContactIP(ctx context.Context, ueIP, mcpttID string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := formatTime(time.Now().UTC())
 	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO ue_contacts (ue_ip, mcptt_id, updated_at) VALUES (?, ?, ?)
 ON CONFLICT(ue_ip) DO UPDATE SET mcptt_id = excluded.mcptt_id, updated_at = excluded.updated_at`),
 		ueIP, mcpttID, now)
