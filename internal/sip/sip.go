@@ -33,6 +33,7 @@ type Server struct {
 	ueSubRoute     sync.Map // lower(IMPU) → store.Subscription, latest subscription per UE for RX INVITE routing
 	uasInvites     sync.Map // callID → *uasInviteState, UAS INVITE pending final response (for CANCEL §9.2)
 	notifyCSeq     sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
+	transactions   sync.Map // transactionKey → *serverTransaction, for retransmission absorption (RFC 3261 §17.2)
 
 	// Concurrency limits for the listeners. Each is a counting semaphore: a
 	// slot is taken before a handler starts and released when it returns.
@@ -303,6 +304,14 @@ func (s *Server) handleRaw(ctx context.Context, source, transport string, raw []
 		"source", source,
 		"transport", transport,
 	)
+
+	// Absorb retransmissions before any handler runs. UDP peers retransmit on
+	// their own timers, and without this a duplicated INVITE re-created the
+	// dialog, re-wrote the call record and re-sent every group notification.
+	send, proceed := s.beginServerTransaction(msg, send)
+	if !proceed {
+		return
+	}
 
 	switch strings.ToUpper(msg.Method) {
 	case "OPTIONS":

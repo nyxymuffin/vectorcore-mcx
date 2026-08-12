@@ -63,7 +63,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 6)
+	errCh := make(chan error, 7)
 	sipSrv := sipserver.NewServer(cfg, st)
 	go func() { errCh <- api.New(st, cfg, version).Start(ctx, cfg.API.Listen) }()
 	go func() { errCh <- cms.NewServer(cfg, st).Start(ctx) }()
@@ -71,6 +71,7 @@ func main() {
 	go func() { errCh <- sipSrv.ListenUDP(ctx) }()
 	go func() { errCh <- sipSrv.ListenTCP(ctx) }()
 	go func() { errCh <- sipSrv.StartOptions(ctx) }()
+	go func() { errCh <- sipSrv.StartTransactionReaper(ctx) }()
 	go startRegistrationExpiry(ctx, st)
 
 	slog.Info("VectorCore MCX started", "version", version, "config", *configPath, "database_driver", cfg.Database.Driver)
