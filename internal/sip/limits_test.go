@@ -114,3 +114,73 @@ func TestHandleTCPConnClosesSilentConnection(t *testing.T) {
 		t.Fatal("handleTCPConn did not return; a silent peer holds the connection open")
 	}
 }
+
+// The listeners must bound the work they start. Without a limit a traffic
+// burst spawns unbounded goroutines, each able to open a database
+// transaction, so overload becomes memory pressure instead of backpressure.
+func TestNewServerBoundsListenerConcurrency(t *testing.T) {
+	s := NewServer(config.Default(), nil)
+
+	if got := cap(s.udpSem); got != maxConcurrentUDPHandlers {
+		t.Fatalf("udp semaphore capacity = %d, want %d", got, maxConcurrentUDPHandlers)
+	}
+	if got := cap(s.tcpSem); got != maxConcurrentTCPConns {
+		t.Fatalf("tcp semaphore capacity = %d, want %d", got, maxConcurrentTCPConns)
+	}
+}
+
+func TestServeTCPConnRefusesWhenAtLimit(t *testing.T) {
+	s := NewServer(config.Default(), nil)
+	s.tcpSem = make(chan struct{}, 1)
+	s.tcpSem <- struct{}{} // occupy the only slot
+
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	if s.serveTCPConn(context.Background(), server) {
+		t.Fatal("connection accepted despite the limit being reached")
+	}
+}
+
+func TestServeTCPConnReleasesItsSlot(t *testing.T) {
+	restore := sipTCPReadTimeout
+	sipTCPReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { sipTCPReadTimeout = restore })
+
+	s := NewServer(config.Default(), nil)
+	s.tcpSem = make(chan struct{}, 1)
+
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	if !s.serveTCPConn(context.Background(), server) {
+		t.Fatal("first connection should have been accepted")
+	}
+
+	// The handler returns once its read deadline fires, which must free the
+	// slot for the next connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(s.tcpSem) == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("slot was never released; the semaphore leaks on handler exit")
+}
+
+func TestServePacketDropsWhenAtLimit(t *testing.T) {
+	s := NewServer(config.Default(), nil)
+	s.udpSem = make(chan struct{}, 1)
+	s.udpSem <- struct{}{} // occupy the only slot
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+
+	if s.servePacket(context.Background(), pc, pc.LocalAddr(), []byte("OPTIONS sip:x SIP/2.0\r\n\r\n")) {
+		t.Fatal("datagram accepted despite the limit being reached")
+	}
+}

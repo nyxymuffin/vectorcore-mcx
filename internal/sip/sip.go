@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/cms"
@@ -32,7 +33,22 @@ type Server struct {
 	ueSubRoute     sync.Map // lower(IMPU) → store.Subscription, latest subscription per UE for RX INVITE routing
 	uasInvites     sync.Map // callID → *uasInviteState, UAS INVITE pending final response (for CANCEL §9.2)
 	notifyCSeq     sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
+
+	// Concurrency limits for the listeners. Each is a counting semaphore: a
+	// slot is taken before a handler starts and released when it returns.
+	udpSem     chan struct{}
+	tcpSem     chan struct{}
+	udpDropped atomic.Uint64
+	tcpRefused atomic.Uint64
 }
+
+// Bounds on concurrent work started by the listeners. Every handler can open a
+// database transaction, so an unbounded fan-out turns a traffic burst into
+// connection-pool exhaustion and memory pressure rather than backpressure.
+const (
+	maxConcurrentUDPHandlers = 256
+	maxConcurrentTCPConns    = 256
+)
 
 type Message struct {
 	StartLine string
@@ -65,7 +81,13 @@ type uasInviteState struct {
 }
 
 func NewServer(cfg config.Config, st store.Store) *Server {
-	return &Server{cfg: cfg, st: st, learned: map[string]learnedRoute{}}
+	return &Server{
+		cfg:     cfg,
+		st:      st,
+		learned: map[string]learnedRoute{},
+		udpSem:  make(chan struct{}, maxConcurrentUDPHandlers),
+		tcpSem:  make(chan struct{}, maxConcurrentTCPConns),
+	}
 }
 
 func (s *Server) StartOptions(ctx context.Context) error {
@@ -112,7 +134,31 @@ func (s *Server) ListenUDP(ctx context.Context) error {
 			return err
 		}
 		raw := append([]byte(nil), buf[:n]...)
-		go s.handlePacket(ctx, pc, addr, raw, "udp")
+		if !s.servePacket(ctx, pc, addr, raw) {
+			if n := s.udpDropped.Add(1); n%100 == 1 {
+				slog.Warn("SIP UDP overloaded, datagram dropped",
+					"source", addr.String(), "limit", cap(s.udpSem), "dropped_total", n)
+			}
+		}
+	}
+}
+
+// servePacket starts handling a datagram if a slot is free, and reports
+// whether it was accepted.
+//
+// Load is shed rather than queued: SIP peers retransmit, so dropping a
+// datagram under overload recovers, whereas spawning goroutines without limit
+// does not.
+func (s *Server) servePacket(ctx context.Context, pc net.PacketConn, addr net.Addr, raw []byte) bool {
+	select {
+	case s.udpSem <- struct{}{}:
+		go func() {
+			defer func() { <-s.udpSem }()
+			s.handlePacket(ctx, pc, addr, raw, "udp")
+		}()
+		return true
+	default:
+		return false
 	}
 }
 
@@ -140,7 +186,30 @@ func (s *Server) ListenTCP(ctx context.Context) error {
 			}
 			return err
 		}
-		go s.handleTCPConn(ctx, conn)
+		if !s.serveTCPConn(ctx, conn) {
+			// Refuse immediately rather than accept a connection that would
+			// sit unserved holding a file descriptor.
+			if n := s.tcpRefused.Add(1); n%100 == 1 {
+				slog.Warn("SIP TCP connection limit reached, refusing",
+					"source", conn.RemoteAddr().String(), "limit", cap(s.tcpSem), "refused_total", n)
+			}
+			_ = conn.Close()
+		}
+	}
+}
+
+// serveTCPConn starts handling a connection if a slot is free, and reports
+// whether it was accepted. The caller closes a refused connection.
+func (s *Server) serveTCPConn(ctx context.Context, conn net.Conn) bool {
+	select {
+	case s.tcpSem <- struct{}{}:
+		go func() {
+			defer func() { <-s.tcpSem }()
+			s.handleTCPConn(ctx, conn)
+		}()
+		return true
+	default:
+		return false
 	}
 }
 
