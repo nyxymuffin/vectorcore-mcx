@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -145,11 +146,18 @@ func (s *Server) ListenTCP(ctx context.Context) error {
 
 func (s *Server) handleTCPConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReaderSize(conn, sipReaderBufferBytes)
 	for {
+		// Reset before every message rather than once per connection, so an
+		// active peer is never disconnected mid-conversation while a silent
+		// one is still reclaimed.
+		if err := conn.SetReadDeadline(time.Now().Add(sipTCPReadTimeout)); err != nil {
+			slog.Warn("SIP TCP set deadline failed", "err", err, "source", conn.RemoteAddr().String())
+			return
+		}
 		raw, err := readSIPMessage(reader)
 		if err != nil {
-			if err != io.EOF {
+			if !errors.Is(err, io.EOF) {
 				slog.Warn("SIP TCP read failed", "err", err, "source", conn.RemoteAddr().String())
 			}
 			return
@@ -2010,12 +2018,58 @@ func (m *Message) Part(contentType string) *Part {
 	return nil
 }
 
+// Limits on messages read from a stream transport. Every one of these bounds a
+// value the remote peer controls, so none of them may be used to size an
+// allocation or to terminate a loop on their own.
+const (
+	// sipReaderBufferBytes sizes the bufio.Reader, and so also caps the length
+	// of a single header line. It needs to comfortably hold a long Via or
+	// Record-Route set.
+	sipReaderBufferBytes = 16 << 10
+
+	// maxSIPHeaderBytes bounds the whole header section. Without it a peer
+	// that never sends the terminating blank line grows the buffer until the
+	// process runs out of memory.
+	maxSIPHeaderBytes = 64 << 10
+
+	// maxSIPBodyBytes bounds the body. MCPTT bodies are multipart XML plus SDP
+	// and are measured in kilobytes, so this is generous.
+	maxSIPBodyBytes = 256 << 10
+)
+
+// sipTCPReadTimeout bounds how long a stream connection may go without
+// delivering a complete message. It is reset before each read, so a peer that
+// is exchanging traffic is unaffected while a connection that is opened and
+// then left silent is reclaimed. A variable rather than a constant so tests can
+// shorten it.
+var sipTCPReadTimeout = 5 * time.Minute
+
+// readHeaderLine reads one CRLF-terminated header line.
+//
+// bufio.Reader.ReadString would grow without bound, so a peer could exhaust
+// memory with a single very long line before any length check on the assembled
+// header section could run. ReadSlice instead fails once the buffer is full,
+// which turns that into a bounded error.
+func readHeaderLine(r *bufio.Reader) (string, error) {
+	line, err := r.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		return "", fmt.Errorf("SIP header line exceeds %d bytes", r.Size())
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(line), nil
+}
+
 func readSIPMessage(r *bufio.Reader) ([]byte, error) {
 	var head bytes.Buffer
 	for {
-		line, err := r.ReadString('\n')
+		line, err := readHeaderLine(r)
 		if err != nil {
 			return nil, err
+		}
+		if head.Len()+len(line) > maxSIPHeaderBytes {
+			return nil, fmt.Errorf("SIP header section exceeds %d bytes", maxSIPHeaderBytes)
 		}
 		head.WriteString(line)
 		trimmed := strings.TrimRight(line, "\r\n")
@@ -2034,6 +2088,12 @@ func readSIPMessage(r *bufio.Reader) ([]byte, error) {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
 			return nil, fmt.Errorf("invalid Content-Length %q", v)
+		}
+		// Checked before the allocation below, not after: Content-Length is
+		// whatever the peer claims, and a single datagram declaring a
+		// multi-gigabyte body would otherwise be enough to exhaust memory.
+		if n > maxSIPBodyBytes {
+			return nil, fmt.Errorf("Content-Length %d exceeds the %d byte limit", n, maxSIPBodyBytes)
 		}
 		cl = n
 	}
