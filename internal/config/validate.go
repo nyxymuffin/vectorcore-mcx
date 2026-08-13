@@ -104,6 +104,15 @@ func (c Config) validateListeners() []error {
 			problems = append(problems, err)
 		}
 	}
+	if strings.TrimSpace(c.SIP.TLSListen) != "" {
+		if err := validateListenAddr("sip.tls_listen", c.SIP.TLSListen); err != nil {
+			problems = append(problems, err)
+		}
+		if !c.TLS.Enabled {
+			problems = append(problems, errors.New(
+				"sip.tls_listen: requires the tls section to be enabled, since the listener serves its certificates"))
+		}
+	}
 	if err := validatePort("sip.advertise_port", c.SIP.AdvertisePort); err != nil {
 		problems = append(problems, err)
 	}

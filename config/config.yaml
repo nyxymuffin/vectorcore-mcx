@@ -11,6 +11,9 @@ api:
 sip:
   udp_listen: ":5060"
   tcp_listen: ":5060"
+  # SIP over TLS (RFC 3261 sips transport). Empty disables the listener.
+  # Requires the tls section below, whose certificates it serves.
+  # tls_listen: ":5061"
   # Address peers reach this server on. It is advertised in Contact and
   # Record-Route, so it must be routable from both the UEs and the IMS core.
   advertise_host: "192.0.2.10"
@@ -131,4 +134,8 @@ tls:
   # Optional mutual TLS: when set, clients must present a certificate that
   # verifies against this CA bundle.
   client_ca_file: ""
+  # CA bundle appended to the system roots when this server dials TLS peers
+  # itself (outbound SIP over TLS). Point this at the internal PKI's issuing
+  # CA; peer verification is never skipped.
+  peer_ca_file: ""
   min_version: "1.2" # 1.2 | 1.3

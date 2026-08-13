@@ -104,7 +104,7 @@ func TestHandleTCPConnClosesSilentConnection(t *testing.T) {
 	s := NewServer(config.Default(), nil)
 	done := make(chan struct{})
 	go func() {
-		s.handleTCPConn(context.Background(), server)
+		s.handleStreamConn(context.Background(), server, "tcp")
 		close(done)
 	}()
 
@@ -137,7 +137,7 @@ func TestServeTCPConnRefusesWhenAtLimit(t *testing.T) {
 	server, client := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 
-	if s.serveTCPConn(context.Background(), server) {
+	if s.serveStreamConn(context.Background(), server, "tcp") {
 		t.Fatal("connection accepted despite the limit being reached")
 	}
 }
@@ -153,7 +153,7 @@ func TestServeTCPConnReleasesItsSlot(t *testing.T) {
 	server, client := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
 
-	if !s.serveTCPConn(context.Background(), server) {
+	if !s.serveStreamConn(context.Background(), server, "tcp") {
 		t.Fatal("first connection should have been accepted")
 	}
 

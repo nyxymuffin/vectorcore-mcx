@@ -315,3 +315,27 @@ func TestDerivedURLsUseHTTPWhenTLSDisabled(t *testing.T) {
 		t.Fatalf("xcap root = %q, want http while TLS is disabled", cfg.CMS.XCAPRoot)
 	}
 }
+
+// A SIP TLS listener without certificates would either fail at bind or,
+// worse, tempt a fallback to plaintext; refuse the configuration instead.
+func TestValidateRejectsSIPTLSListenerWithoutTLSSection(t *testing.T) {
+	cfg := Default()
+	cfg.SIP.TLSListen = ":5061"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "sip.tls_listen") {
+		t.Fatalf("expected sip.tls_listen to require the tls section, got: %v", err)
+	}
+}
+
+func TestValidateAcceptsSIPTLSListenerWithTLSSection(t *testing.T) {
+	cfg := Default()
+	cfg.SIP.TLSListen = ":5061"
+	cfg.TLS.Enabled = true
+	cfg.TLS.CertFile = "/etc/mcxas/cert.pem"
+	cfg.TLS.KeyFile = "/etc/mcxas/key.pem"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a fully specified SIP TLS listener must validate, got: %v", err)
+	}
+}

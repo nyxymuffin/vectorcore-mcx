@@ -53,3 +53,34 @@ func minVersion(v string) uint16 {
 	}
 	return tls.VersionTLS12
 }
+
+// ClientConfig builds the tls.Config used when this server dials a TLS peer.
+// Verification uses the system roots plus tls.peer_ca_file when set, so a
+// deployment on an internal PKI trusts its own issuing CA without disabling
+// verification. Verification is never skipped: an unverified TLS connection
+// gives confidentiality against a passive observer only, which is not what a
+// configuration named TLS promises.
+func ClientConfig(cfg config.TLSConfig, serverName string) (*tls.Config, error) {
+	out := &tls.Config{
+		MinVersion: minVersion(cfg.MinVersion),
+		ServerName: serverName,
+	}
+
+	if strings.TrimSpace(cfg.PeerCAFile) != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			// No system pool (rare, but possible on minimal images): trust
+			// the configured CA alone rather than failing outright.
+			pool = x509.NewCertPool()
+		}
+		pem, err := os.ReadFile(cfg.PeerCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read peer CA bundle: %w", err)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("peer CA bundle %s contains no usable certificates", cfg.PeerCAFile)
+		}
+		out.RootCAs = pool
+	}
+	return out, nil
+}

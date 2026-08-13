@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/svinson1121/vectorcore-mcx/internal/cms"
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
+	"github.com/svinson1121/vectorcore-mcx/internal/tlsutil"
 )
 
 type Server struct {
@@ -165,14 +167,48 @@ func (s *Server) servePacket(ctx context.Context, pc net.PacketConn, addr net.Ad
 
 func (s *Server) ListenTCP(ctx context.Context) error {
 	if strings.TrimSpace(s.cfg.SIP.TCPListen) == "" {
+		// Disabled. Block rather than return: main treats the first value on
+		// its error channel as the signal to shut down, so an immediate nil
+		// would stop the whole process.
+		<-ctx.Done()
 		return nil
 	}
 	ln, err := net.Listen("tcp", s.cfg.SIP.TCPListen)
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
 	slog.Info("SIP TCP listening", "addr", s.cfg.SIP.TCPListen)
+	return s.serveStream(ctx, ln, "tcp")
+}
+
+// ListenTLS serves SIP over TLS (RFC 3261 clause 26.2.1) on sip.tls_listen,
+// using the certificates of the shared tls section. Framing and handling are
+// those of the TCP path; only the transport label differs, which flows into
+// the Via and advertised URIs so responses and route sets carry
+// "SIP/2.0/TLS" and ";transport=tls".
+func (s *Server) ListenTLS(ctx context.Context) error {
+	if strings.TrimSpace(s.cfg.SIP.TLSListen) == "" {
+		<-ctx.Done()
+		return nil
+	}
+	tlsConf, err := tlsutil.ServerConfig(s.cfg.TLS)
+	if err != nil {
+		return fmt.Errorf("sip tls listener: %w", err)
+	}
+	if tlsConf == nil {
+		return fmt.Errorf("sip.tls_listen is set but the tls section is disabled")
+	}
+	ln, err := tls.Listen("tcp", s.cfg.SIP.TLSListen, tlsConf)
+	if err != nil {
+		return err
+	}
+	slog.Info("SIP TLS listening", "addr", s.cfg.SIP.TLSListen)
+	return s.serveStream(ctx, ln, "tls")
+}
+
+// serveStream is the accept loop shared by the TCP and TLS listeners.
+func (s *Server) serveStream(ctx context.Context, ln net.Listener, transport string) error {
+	defer ln.Close()
 
 	go func() {
 		<-ctx.Done()
@@ -187,7 +223,7 @@ func (s *Server) ListenTCP(ctx context.Context) error {
 			}
 			return err
 		}
-		if !s.serveTCPConn(ctx, conn) {
+		if !s.serveStreamConn(ctx, conn, transport) {
 			// Refuse immediately rather than accept a connection that would
 			// sit unserved holding a file descriptor.
 			if n := s.tcpRefused.Add(1); n%100 == 1 {
@@ -199,14 +235,14 @@ func (s *Server) ListenTCP(ctx context.Context) error {
 	}
 }
 
-// serveTCPConn starts handling a connection if a slot is free, and reports
+// serveStreamConn starts handling a connection if a slot is free, and reports
 // whether it was accepted. The caller closes a refused connection.
-func (s *Server) serveTCPConn(ctx context.Context, conn net.Conn) bool {
+func (s *Server) serveStreamConn(ctx context.Context, conn net.Conn, transport string) bool {
 	select {
 	case s.tcpSem <- struct{}{}:
 		go func() {
 			defer func() { <-s.tcpSem }()
-			s.handleTCPConn(ctx, conn)
+			s.handleStreamConn(ctx, conn, transport)
 		}()
 		return true
 	default:
@@ -214,7 +250,7 @@ func (s *Server) serveTCPConn(ctx context.Context, conn net.Conn) bool {
 	}
 }
 
-func (s *Server) handleTCPConn(ctx context.Context, conn net.Conn) {
+func (s *Server) handleStreamConn(ctx context.Context, conn net.Conn, transport string) {
 	defer conn.Close()
 	reader := bufio.NewReaderSize(conn, sipReaderBufferBytes)
 	for {
@@ -232,7 +268,7 @@ func (s *Server) handleTCPConn(ctx context.Context, conn net.Conn) {
 			}
 			return
 		}
-		s.handleRaw(ctx, conn.RemoteAddr().String(), "tcp", raw, func(resp []byte) error {
+		s.handleRaw(ctx, conn.RemoteAddr().String(), transport, raw, func(resp []byte) error {
 			_, err := conn.Write(resp)
 			return err
 		})
@@ -380,7 +416,7 @@ func (s *Server) sendOptions(ctx context.Context) {
 			{"Contact", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
 			{"User-Agent", productName},
 		}, nil)
-		if err := sendOutbound(ctx, route.Transport, route.Target, []byte(req)); err != nil {
+		if err := s.sendOutbound(ctx, route.Transport, route.Target, []byte(req)); err != nil {
 			slog.Warn("SIP OPTIONS send failed", "target", route.Target, "transport", route.Transport, "err", err)
 		} else {
 			slog.Debug("SIP OPTIONS sent", "target", route.Target, "transport", route.Transport)
@@ -1149,7 +1185,7 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	inviteMsg := buildRequest("INVITE", memberImpu, hdrs, []byte(multipartBody))
 
 	slog.Info("RX INVITE sending", "call_id", callID, "member", memberImpu, "target", target, "group_uri", groupURI, "tx_call_id", txCallID)
-	if err := sendOutbound(ctx, transport, target, []byte(inviteMsg)); err != nil {
+	if err := s.sendOutbound(ctx, transport, target, []byte(inviteMsg)); err != nil {
 		slog.Warn("RX INVITE send failed", "call_id", callID, "member", memberImpu, "err", err)
 		return
 	}
@@ -1228,7 +1264,7 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		ackHdrs = append(ackHdrs, header{"Route", r})
 	}
 	ackMsg := buildRequest("ACK", ackReqURI, ackHdrs, nil)
-	if err := sendOutbound(ctx, transport, ackTarget, []byte(ackMsg)); err != nil {
+	if err := s.sendOutbound(ctx, transport, ackTarget, []byte(ackMsg)); err != nil {
 		slog.Warn("RX ACK send failed", "call_id", callID, "member", memberImpu, "err", err)
 	}
 
@@ -1326,7 +1362,7 @@ func (s *Server) sendRXBYE(ctx context.Context, call store.MCPTTCall) {
 	}
 	bye := buildRequest("BYE", byeReqURI, hdrs, nil)
 	slog.Info("RX BYE sending", "call_id", call.CallID, "member", call.TargetURI, "group_uri", call.GroupURI)
-	if err := sendOutbound(ctx, transport, target, []byte(bye)); err != nil {
+	if err := s.sendOutbound(ctx, transport, target, []byte(bye)); err != nil {
 		slog.Warn("RX BYE send failed", "call_id", call.CallID, "err", err)
 	}
 	if err := s.st.UpdateCallState(ctx, call.CallID, "terminated"); err != nil {
@@ -1382,7 +1418,7 @@ func (s *Server) sendNotify(ctx context.Context, sub store.Subscription, subscri
 		headers = append([]header{{"Route", routes[i]}}, headers...)
 	}
 	msg := buildRequest("NOTIFY", reqURI, headers, body)
-	err = sendOutbound(ctx, transport, target, []byte(msg))
+	err = s.sendOutbound(ctx, transport, target, []byte(msg))
 	if err == nil {
 		slog.Info("SIP NOTIFY sent", "target", target, "transport", transport, "request_uri", reqURI, "route_count", len(routes), "remote_target", sub.RemoteTarget, "call_id", sub.CallID, "event", sub.Event)
 		slog.Debug("SIP NOTIFY request", "call_id", sub.CallID, "event", sub.Event, "target", target, "message", msg)
@@ -2757,9 +2793,26 @@ func learnedTarget(sub store.Subscription) (target, transport string, routes []s
 	return "", "", nil, fmt.Errorf("no learned SIP route for subscription call_id=%s", sub.CallID)
 }
 
-func sendOutbound(ctx context.Context, transport, target string, msg []byte) error {
+func (s *Server) sendOutbound(ctx context.Context, transport, target string, msg []byte) error {
+	transport = strings.ToLower(strings.TrimSpace(transport))
 	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, strings.ToLower(transport), target)
+
+	if transport == "tls" {
+		clientConf, err := tlsutil.ClientConfig(s.cfg.TLS, "")
+		if err != nil {
+			return err
+		}
+		tlsDialer := tls.Dialer{NetDialer: &dialer, Config: clientConf}
+		conn, err := tlsDialer.DialContext(ctx, "tcp", target)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		_, err = conn.Write(msg)
+		return err
+	}
+
+	conn, err := dialer.DialContext(ctx, transport, target)
 	if err != nil {
 		return err
 	}

@@ -37,6 +37,7 @@ type APIConfig struct {
 type SIPConfig struct {
 	UDPListen           string        `yaml:"udp_listen"`
 	TCPListen           string        `yaml:"tcp_listen"`
+	TLSListen           string        `yaml:"tls_listen"`
 	AdvertiseHost       string        `yaml:"advertise_host"`
 	AdvertisePort       int           `yaml:"advertise_port"`
 	Transport           string        `yaml:"transport"`
@@ -94,7 +95,11 @@ type TLSConfig struct {
 	// ClientCAFile, when set, additionally requires and verifies a client
 	// certificate against this CA bundle (mutual TLS).
 	ClientCAFile string `yaml:"client_ca_file"`
-	MinVersion   string `yaml:"min_version"`
+	// PeerCAFile is appended to the system roots when this server dials TLS
+	// peers itself (outbound SIP over TLS). Deployments on an internal PKI
+	// point this at their issuing CA.
+	PeerCAFile string `yaml:"peer_ca_file"`
+	MinVersion string `yaml:"min_version"`
 }
 
 // IDMSConfig controls the built-in identity shim.
