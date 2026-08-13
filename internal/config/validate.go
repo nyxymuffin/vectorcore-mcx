@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +25,31 @@ func (c Config) Validate() error {
 	problems = append(problems, c.validateListeners()...)
 	problems = append(problems, c.validateMediaPorts()...)
 	problems = append(problems, c.validateDurations()...)
+	problems = append(problems, c.validateIDMS()...)
 	return errors.Join(problems...)
+}
+
+// validateIDMS refuses configurations that would enable the development
+// identity shim in a state where it cannot behave safely.
+func (c Config) validateIDMS() []error {
+	if !c.IDMS.DevelopmentShimEnabled {
+		return nil
+	}
+
+	var problems []error
+	if len(c.IDMS.AllowedRedirectURIs) == 0 {
+		problems = append(problems, errors.New(
+			"idms.allowed_redirect_uris: at least one URI is required when the development shim is enabled; "+
+				"an unrestricted redirect_uri is an open redirect that leaks the authorization code"))
+	}
+	for i, raw := range c.IDMS.AllowedRedirectURIs {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			problems = append(problems, fmt.Errorf(
+				"idms.allowed_redirect_uris[%d]: %q must be an absolute URI", i, raw))
+		}
+	}
+	return problems
 }
 
 // validateEnums checks the fields that accept a fixed vocabulary. Without this

@@ -19,14 +19,27 @@ import (
 )
 
 type Server struct {
-	st      store.Store
-	cfg     config.Config
-	version string
-	startAt time.Time
+	st         store.Store
+	cfg        config.Config
+	version    string
+	startAt    time.Time
+	idmsSigner *idmsSigner
 }
 
 func New(st store.Store, cfg config.Config, version string) *Server {
-	return &Server{st: st, cfg: cfg, version: version, startAt: time.Now()}
+	s := &Server{st: st, cfg: cfg, version: version, startAt: time.Now()}
+	if cfg.IDMS.DevelopmentShimEnabled {
+		signer, err := newIDMSSigner(cfg.IDMS.SigningKeyFile)
+		if err != nil {
+			// The shim was asked for but cannot sign. Leaving the signer nil
+			// makes its endpoints fail closed rather than fall back to an
+			// unsigned token, which TS 33.180 Annex B.2.2.1 forbids.
+			slog.Error("IDMS development shim enabled but signing key unavailable; token endpoint will refuse requests", "err", err)
+		} else {
+			s.idmsSigner = signer
+		}
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -51,7 +64,13 @@ func (s *Server) Handler() http.Handler {
 	registerCalls(api, s.st)
 	registerDialogs(api, s.st)
 
-	registerIDMSShim(mux, s)
+	// The development identity shim authenticates nobody, so it is registered
+	// only when explicitly enabled. When disabled its paths do not exist at
+	// all rather than returning an error, so there is nothing to probe.
+	if s.cfg.IDMS.DevelopmentShimEnabled {
+		slog.Warn("IDMS development shim enabled: it performs NO user authentication and must not be reachable from an untrusted network")
+		registerIDMSShim(mux, s)
+	}
 
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Get("/health", func(w http.ResponseWriter, r *http.Request) {

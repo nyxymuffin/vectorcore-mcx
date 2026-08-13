@@ -212,3 +212,49 @@ func TestLoadRejectsInvalidFileAndNamesIt(t *testing.T) {
 		t.Fatalf("error %q should name the offending field", err)
 	}
 }
+
+// The shim hands out credentials, so enabling it without a registered redirect
+// URI must be refused rather than silently allowing any target.
+func TestValidateRejectsEnabledShimWithoutRegisteredRedirect(t *testing.T) {
+	cfg := Default()
+	cfg.IDMS.DevelopmentShimEnabled = true
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected the enabled shim to require a registered redirect URI")
+	}
+	if !strings.Contains(err.Error(), "idms.allowed_redirect_uris") {
+		t.Fatalf("error %q does not name the offending field", err)
+	}
+}
+
+func TestValidateRejectsRelativeRedirectURI(t *testing.T) {
+	cfg := Default()
+	cfg.IDMS.DevelopmentShimEnabled = true
+	cfg.IDMS.AllowedRedirectURIs = []string{"/callback"}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected a relative redirect URI to be rejected")
+	}
+	if !strings.Contains(err.Error(), "absolute URI") {
+		t.Fatalf("error %q does not explain the requirement", err)
+	}
+}
+
+func TestValidateAcceptsEnabledShimWithRegisteredRedirect(t *testing.T) {
+	cfg := Default()
+	cfg.IDMS.DevelopmentShimEnabled = true
+	cfg.IDMS.AllowedRedirectURIs = []string{"http://192.0.2.20:9000/callback"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a properly configured shim must validate, got: %v", err)
+	}
+}
+
+// The shim must stay off unless deliberately switched on.
+func TestDefaultConfigLeavesTheShimDisabled(t *testing.T) {
+	if Default().IDMS.DevelopmentShimEnabled {
+		t.Fatal("the development identity shim must default to disabled")
+	}
+}

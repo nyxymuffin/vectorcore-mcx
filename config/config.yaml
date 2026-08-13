@@ -88,3 +88,29 @@ ims:
 #   idms_auth_endpoint: "http://192.0.2.10:8080/idms/authorize"
 #   idms_token_endpoint: "http://192.0.2.10:8080/idms/token"
 #   http_proxy_uri: "http://192.0.2.10:8080"
+
+idms:
+  # Built-in development identity shim.
+  #
+  # This is NOT an implementation of 3GPP TS 24.482. It performs no user
+  # authentication whatsoever: any caller that can reach /idms/token is issued
+  # a token asserting a provisioned subscriber's MCPTT identity. Enable it only
+  # on an isolated bring-up network, and point mcx.idms_*_endpoint at a real
+  # identity management server for anything else.
+  #
+  # When disabled, the /idms/* paths are not registered at all.
+  development_shim_enabled: false
+
+  # ES256 signing key for shim-issued tokens, PEM encoded (SEC 1 or PKCS#8,
+  # P-256). Left empty an ephemeral key is generated at startup, so tokens stop
+  # verifying across a restart. The public key is served at /idms/jwks.json.
+  signing_key_file: ""
+
+  # Value placed in the "iss" claim. Defaults to vectorcore-mcx-idms.
+  issuer: ""
+
+  # Redirect URIs the shim will send an authorization code to. Required when
+  # the shim is enabled, and matched exactly: TS 33.180 Annex B.3 requires
+  # clients and their redirect URIs to be pre-registered, and an unrestricted
+  # redirect_uri is an open redirect that leaks the code.
+  allowed_redirect_uris: []

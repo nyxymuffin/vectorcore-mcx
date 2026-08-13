@@ -19,6 +19,7 @@ type Config struct {
 	Log      LogConfig      `yaml:"log"`
 	IMS      IMSConfig      `yaml:"ims"`
 	MCX      MCXConfig      `yaml:"mcx"`
+	IDMS     IDMSConfig     `yaml:"idms"`
 
 	// UsedDefaults reports that the file named on the command line did not
 	// exist and the built-in defaults were used instead. Load treats that as
@@ -76,6 +77,20 @@ type DatabaseConfig struct {
 type LogConfig struct {
 	File  string `yaml:"file"`
 	Level string `yaml:"level"`
+}
+
+// IDMSConfig controls the built-in identity shim.
+//
+// The shim is NOT an implementation of 3GPP TS 24.482. It performs no user
+// authentication at all: any caller able to reach the token endpoint is issued
+// a token asserting a provisioned subscriber's MCPTT identity. It exists for
+// bring-up against a client that expects an OIDC endpoint, and is disabled
+// unless explicitly switched on.
+type IDMSConfig struct {
+	DevelopmentShimEnabled bool     `yaml:"development_shim_enabled"`
+	SigningKeyFile         string   `yaml:"signing_key_file"`
+	Issuer                 string   `yaml:"issuer"`
+	AllowedRedirectURIs    []string `yaml:"allowed_redirect_uris"`
 }
 
 type IMSConfig struct {
