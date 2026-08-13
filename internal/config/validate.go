@@ -26,7 +26,26 @@ func (c Config) Validate() error {
 	problems = append(problems, c.validateMediaPorts()...)
 	problems = append(problems, c.validateDurations()...)
 	problems = append(problems, c.validateIDMS()...)
+	problems = append(problems, c.validateTLS()...)
 	return errors.Join(problems...)
+}
+
+// validateTLS refuses a TLS section that could not possibly serve. File
+// existence is deliberately not checked here: Validate is pure, and the
+// listener reports a missing or unreadable file with a better error at bind
+// time.
+func (c Config) validateTLS() []error {
+	var problems []error
+	if c.TLS.Enabled {
+		if strings.TrimSpace(c.TLS.CertFile) == "" {
+			problems = append(problems, errors.New("tls.cert_file: required when tls.enabled is true"))
+		}
+		if strings.TrimSpace(c.TLS.KeyFile) == "" {
+			problems = append(problems, errors.New("tls.key_file: required when tls.enabled is true"))
+		}
+	}
+	problems = append(problems, oneOf("tls.min_version", c.TLS.MinVersion, "1.2", "1.3"))
+	return problems
 }
 
 // validateIDMS refuses configurations that would enable the development

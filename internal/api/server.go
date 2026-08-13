@@ -16,6 +16,7 @@ import (
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
+	"github.com/svinson1121/vectorcore-mcx/internal/tlsutil"
 )
 
 type Server struct {
@@ -90,17 +91,28 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Start(ctx context.Context, addr string) error {
+	tlsConf, err := tlsutil.ServerConfig(s.cfg.TLS)
+	if err != nil {
+		return fmt.Errorf("api listener: %w", err)
+	}
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      s.Handler(),
+		TLSConfig:    tlsConf,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("API server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		serve := srv.ListenAndServe
+		if tlsConf != nil {
+			// Certificates already live in TLSConfig, so the file arguments
+			// stay empty.
+			serve = func() error { return srv.ListenAndServeTLS("", "") }
+		}
+		slog.Info("API server listening", "addr", addr, "tls", tlsConf != nil)
+		if err := serve(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()

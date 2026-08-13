@@ -258,3 +258,60 @@ func TestDefaultConfigLeavesTheShimDisabled(t *testing.T) {
 		t.Fatal("the development identity shim must default to disabled")
 	}
 }
+
+func TestValidateRequiresKeypairWhenTLSEnabled(t *testing.T) {
+	cfg := Default()
+	cfg.TLS.Enabled = true
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("enabling TLS without a keypair must be rejected")
+	}
+	for _, want := range []string{"tls.cert_file", "tls.key_file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+func TestValidateRejectsUnknownTLSMinVersion(t *testing.T) {
+	cfg := Default()
+	cfg.TLS.MinVersion = "1.1"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "tls.min_version") {
+		t.Fatalf("expected tls.min_version to be rejected, got: %v", err)
+	}
+}
+
+// Derived URLs must follow the listeners: advertising http endpoints while
+// serving only https leaves every client pointed at a scheme that no longer
+// answers.
+func TestDerivedURLsUseHTTPSWhenTLSEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "tls:\n  enabled: true\n  cert_file: \"/etc/mcxas/cert.pem\"\n  key_file: \"/etc/mcxas/key.pem\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(cfg.CMS.XCAPRoot, "https://") {
+		t.Fatalf("xcap root = %q, want https when TLS is enabled", cfg.CMS.XCAPRoot)
+	}
+	if !strings.HasPrefix(cfg.MCX.IDMSAuthEndpoint, "https://") {
+		t.Fatalf("idms auth endpoint = %q, want https when TLS is enabled", cfg.MCX.IDMSAuthEndpoint)
+	}
+	if !strings.HasPrefix(cfg.MCX.HTTPProxyURI, "https://") {
+		t.Fatalf("http proxy uri = %q, want https when TLS is enabled", cfg.MCX.HTTPProxyURI)
+	}
+}
+
+func TestDerivedURLsUseHTTPWhenTLSDisabled(t *testing.T) {
+	cfg := Default()
+	if !strings.HasPrefix(cfg.CMS.XCAPRoot, "http://") {
+		t.Fatalf("xcap root = %q, want http while TLS is disabled", cfg.CMS.XCAPRoot)
+	}
+}

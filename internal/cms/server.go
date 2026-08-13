@@ -15,6 +15,7 @@ import (
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
+	"github.com/svinson1121/vectorcore-mcx/internal/tlsutil"
 )
 
 type Server struct {
@@ -33,17 +34,26 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/xcap-root/", s.handleXCAP)
 	mux.HandleFunc("/xcap-root", s.handleXCAP)
+	tlsConf, err := tlsutil.ServerConfig(s.cfg.TLS)
+	if err != nil {
+		return fmt.Errorf("cms listener: %w", err)
+	}
 	srv := &http.Server{
 		Addr:         s.cfg.CMS.Listen,
 		Handler:      logRequests(mux),
+		TLSConfig:    tlsConf,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("CMS/XCAP server listening", "addr", s.cfg.CMS.Listen)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		serve := srv.ListenAndServe
+		if tlsConf != nil {
+			serve = func() error { return srv.ListenAndServeTLS("", "") }
+		}
+		slog.Info("CMS/XCAP server listening", "addr", s.cfg.CMS.Listen, "tls", tlsConf != nil)
+		if err := serve(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()

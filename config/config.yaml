@@ -114,3 +114,21 @@ idms:
   # clients and their redirect URIs to be pre-registered, and an unrestricted
   # redirect_uri is an open redirect that leaks the code.
   allowed_redirect_uris: []
+
+tls:
+  # TLS for the two HTTP listeners (OAM API on api.listen, CMS/XCAP on
+  # cms.listen). TS 33.180 makes TLS on HTTP-1 mandatory, so running without
+  # it is a lab convenience, not a peer configuration.
+  #
+  # When enabled, every derived URL (cms.xcap_root, the mcx.idms_*_endpoint
+  # values, mcx.http_proxy_uri) advertises https automatically.
+  #
+  # SIP transport security is separate and will be configured under sip.
+  enabled: false
+  # PEM certificate chain and private key. Required when enabled.
+  cert_file: ""
+  key_file: ""
+  # Optional mutual TLS: when set, clients must present a certificate that
+  # verifies against this CA bundle.
+  client_ca_file: ""
+  min_version: "1.2" # 1.2 | 1.3

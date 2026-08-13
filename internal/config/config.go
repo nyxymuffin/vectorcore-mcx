@@ -20,6 +20,7 @@ type Config struct {
 	IMS      IMSConfig      `yaml:"ims"`
 	MCX      MCXConfig      `yaml:"mcx"`
 	IDMS     IDMSConfig     `yaml:"idms"`
+	TLS      TLSConfig      `yaml:"tls"`
 
 	// UsedDefaults reports that the file named on the command line did not
 	// exist and the built-in defaults were used instead. Load treats that as
@@ -77,6 +78,23 @@ type DatabaseConfig struct {
 type LogConfig struct {
 	File  string `yaml:"file"`
 	Level string `yaml:"level"`
+}
+
+// TLSConfig covers the HTTP listeners (OAM API and CMS/XCAP). TS 33.180
+// makes TLS on HTTP-1 mandatory, so a deployment without it is a lab
+// convenience, not a configuration of equal standing.
+//
+// SIP transport security is a separate concern with its own signalling
+// implications (sips URIs, transport parameters) and is configured under sip
+// when implemented.
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	// ClientCAFile, when set, additionally requires and verifies a client
+	// certificate against this CA bundle (mutual TLS).
+	ClientCAFile string `yaml:"client_ca_file"`
+	MinVersion   string `yaml:"min_version"`
 }
 
 // IDMSConfig controls the built-in identity shim.
@@ -226,7 +244,7 @@ func (c *Config) applyDefaults() {
 		c.CMS.Listen = ":8100"
 	}
 	if c.CMS.XCAPRoot == "" {
-		c.CMS.XCAPRoot = "http://" + net.JoinHostPort(c.SIP.AdvertiseHost, listenPort(c.CMS.Listen, "8100")) + "/xcap-root"
+		c.CMS.XCAPRoot = c.httpScheme() + "://" + net.JoinHostPort(c.SIP.AdvertiseHost, listenPort(c.CMS.Listen, "8100")) + "/xcap-root"
 	}
 	if c.Media.ListenHost == "" {
 		c.Media.ListenHost = "0.0.0.0"
@@ -260,6 +278,10 @@ func (c *Config) applyDefaults() {
 	if c.Database.DSN == "" {
 		c.Database.DSN = "mcxas.db"
 	}
+	if c.TLS.MinVersion == "" {
+		c.TLS.MinVersion = "1.2"
+	}
+	c.TLS.MinVersion = strings.TrimSpace(c.TLS.MinVersion)
 	if c.Log.File == "" {
 		c.Log.File = "mcxas.log"
 	}
@@ -296,7 +318,7 @@ func (c *Config) applyDefaults() {
 	if c.MCX.KMSURI == "" {
 		c.MCX.KMSURI = c.MCX.SIPIdentity
 	}
-	apiBase := "http://" + net.JoinHostPort(c.SIP.AdvertiseHost, listenPort(c.API.Listen, "8080"))
+	apiBase := c.httpScheme() + "://" + net.JoinHostPort(c.SIP.AdvertiseHost, listenPort(c.API.Listen, "8080"))
 	if c.MCX.IDMSAuthEndpoint == "" {
 		c.MCX.IDMSAuthEndpoint = apiBase + "/idms/authorize"
 	}
@@ -306,6 +328,16 @@ func (c *Config) applyDefaults() {
 	if c.MCX.HTTPProxyURI == "" {
 		c.MCX.HTTPProxyURI = apiBase
 	}
+}
+
+// httpScheme is the scheme derived URLs advertise. Derivation runs after the
+// TLS section is unmarshalled, so the advertised endpoints follow the
+// listeners.
+func (c *Config) httpScheme() string {
+	if c.TLS.Enabled {
+		return "https"
+	}
+	return "http"
 }
 
 func advertiseHostFromListen(listen string) string {
