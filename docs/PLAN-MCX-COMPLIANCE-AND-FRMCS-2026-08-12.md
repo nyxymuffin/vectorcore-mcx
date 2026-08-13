@@ -238,7 +238,29 @@ without this.
 *Exit:* `go test ./... -race` green; no secrets in git history going forward; a duplicated INVITE
 no longer re-runs call setup.
 
-### Phase 1 — Security plane
+### Phase 1 — Security plane — DELIVERED 2026-08-12, except key management
+
+Four commits. The exit criteria read against reality:
+
+- **Shim gated:** `idms.development_shim_enabled` defaults false; endpoints
+  unregistered when off; tokens signed ES256 with a published JWKS; open
+  redirect closed. Still not a TS 24.482 IdMS and not intended to be.
+- **No unsigned token accepted:** the only token consumer (service
+  authorization) accepts ES256 only and fails closed when its keys are
+  missing.
+- **TLS:** every listener can now serve TLS (OAM, CMS/XCAP, SIP), outbound
+  SIP dials TLS with mandatory peer verification, and derived URLs follow
+  the scheme. **Plaintext remains the default**, deliberately: flipping the
+  default would brick bring-up with no certificates present. Enabling TLS is
+  a deployment decision, one section in config.yaml.
+- **Service authorization:** opt-in via sip.auth.require_service_authorization;
+  emits the first TS 24.379 Warning text (101).
+- **Carried forward: KMS integration and SRTP/SRTCP.** Phase-sized on its
+  own (MIKEY-SAKKE, GMK/PCK/CSK distribution, SRTP key derivation). Nothing
+  in Phases 2-3 depends on it; it must land before any deployment where the
+  media path crosses an untrusted network.
+
+Original scope, for reference:
 
 TLS on every listener. Decide the IdMS question: either implement 24.482 properly, or hard-disable
 the shim behind explicit config and validate real signed tokens from an external IdMS. Either way
