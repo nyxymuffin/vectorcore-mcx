@@ -41,6 +41,7 @@ type Server struct {
 	// slot is taken before a handler starts and released when it returns.
 	udpSem     chan struct{}
 	tcpSem     chan struct{}
+	authTokens *tokenValidator
 	udpDropped atomic.Uint64
 	tcpRefused atomic.Uint64
 }
@@ -84,13 +85,25 @@ type uasInviteState struct {
 }
 
 func NewServer(cfg config.Config, st store.Store) *Server {
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		st:      st,
 		learned: map[string]learnedRoute{},
 		udpSem:  make(chan struct{}, maxConcurrentUDPHandlers),
 		tcpSem:  make(chan struct{}, maxConcurrentTCPConns),
 	}
+	if cfg.SIP.Auth.RequireServiceAuthorization {
+		validator, err := newTokenValidator(cfg.SIP.Auth.TrustedJWKSFile, cfg.SIP.Auth.TrustedIssuer)
+		if err != nil {
+			// Fail closed: with authorization required and no working
+			// validator, every service authorization is refused rather than
+			// admitted.
+			slog.Error("SIP service authorization enabled but token validator unavailable; all service authorization will be refused", "err", err)
+		} else {
+			s.authTokens = validator
+		}
+	}
+	return s
 }
 
 func (s *Server) StartOptions(ctx context.Context) error {
@@ -437,6 +450,16 @@ func (s *Server) handlePublish(ctx context.Context, send responder, msg *Message
 	userURI := identityFrom(msg)
 	if mcpttID := mcpttIdentityFromBody(msg); mcpttID != "" {
 		userURI = mcpttID
+	}
+	if s.cfg.SIP.Auth.RequireServiceAuthorization {
+		tokenID, err := s.authorizeServicePublish(msg)
+		if err != nil {
+			slog.Warn("MCPTT service authorization refused", "user_uri", userURI, "err", err)
+			s.respond(send, msg, 403, "Forbidden", []header{s.serviceAuthWarning()}, nil)
+			return
+		}
+		// The authenticated identity wins over anything the body asserts.
+		userURI = tokenID
 	}
 	if _, err := s.st.UpsertPublishedState(ctx, store.PublishedState{
 		UserURI: userURI,
@@ -2873,6 +2896,16 @@ func uriFromHeader(h string) string {
 		h = h[:i]
 	}
 	return strings.Trim(h, "<>")
+}
+
+// advertiseHostOnly is the bare advertised host, for header fields that want
+// a hostname rather than a host:port (for example Warning, RFC 3261 20.43).
+func advertiseHostOnly(cfg config.Config) string {
+	host := strings.TrimSpace(cfg.SIP.AdvertiseHost)
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return "127.0.0.1"
+	}
+	return host
 }
 
 func advertiseHost(cfg config.Config) string {

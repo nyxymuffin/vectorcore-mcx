@@ -104,6 +104,10 @@ func (c Config) validateListeners() []error {
 			problems = append(problems, err)
 		}
 	}
+	if c.SIP.Auth.RequireServiceAuthorization && strings.TrimSpace(c.SIP.Auth.TrustedJWKSFile) == "" {
+		problems = append(problems, errors.New(
+			"sip.auth.trusted_jwks_file: required when require_service_authorization is true; without keys every request would be refused"))
+	}
 	if strings.TrimSpace(c.SIP.TLSListen) != "" {
 		if err := validateListenAddr("sip.tls_listen", c.SIP.TLSListen); err != nil {
 			problems = append(problems, err)

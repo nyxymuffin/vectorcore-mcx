@@ -339,3 +339,13 @@ func TestValidateAcceptsSIPTLSListenerWithTLSSection(t *testing.T) {
 		t.Fatalf("a fully specified SIP TLS listener must validate, got: %v", err)
 	}
 }
+
+func TestValidateRequiresJWKSWhenServiceAuthorizationEnabled(t *testing.T) {
+	cfg := Default()
+	cfg.SIP.Auth.RequireServiceAuthorization = true
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "sip.auth.trusted_jwks_file") {
+		t.Fatalf("expected trusted_jwks_file to be required, got: %v", err)
+	}
+}

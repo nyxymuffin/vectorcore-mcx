@@ -26,6 +26,18 @@ sip:
   options:
     enabled: false
     interval: "30s"
+  auth:
+    # Service authorization (TS 33.180 clause 5.1.3.2.3): validate the access
+    # token carried in the service-authorization PUBLISH before believing the
+    # asserted MCPTT identity. Requires the JWKS of the identity management
+    # server; the development shim exports its set at /idms/jwks.json.
+    # Tokens must be ES256; alg:none and unknown algorithms are refused, and
+    # a missing or unloadable JWKS refuses every request rather than admitting
+    # them.
+    require_service_authorization: false
+    trusted_jwks_file: ""
+    # When set, the token's iss claim must match exactly.
+    trusted_issuer: ""
 
 cms:
   enabled: true

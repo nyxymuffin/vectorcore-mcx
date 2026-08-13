@@ -44,6 +44,20 @@ type SIPConfig struct {
 	RecordRoute         bool          `yaml:"record_route"`
 	NotifyRouteSetOrder string        `yaml:"notify_route_set_order"`
 	Options             OptionsConfig `yaml:"options"`
+	Auth                SIPAuthConfig `yaml:"auth"`
+}
+
+// SIPAuthConfig controls service authorization on the SIP interface
+// (TS 33.180 clause 5.1.3.2.3): the access token carried in the
+// service-authorization PUBLISH is validated before the asserted MCPTT
+// identity is believed.
+type SIPAuthConfig struct {
+	RequireServiceAuthorization bool `yaml:"require_service_authorization"`
+	// TrustedJWKSFile holds the JWK set whose keys sign acceptable access
+	// tokens. The development shim exports its set at /idms/jwks.json.
+	TrustedJWKSFile string `yaml:"trusted_jwks_file"`
+	// TrustedIssuer, when set, must equal the token's iss claim.
+	TrustedIssuer string `yaml:"trusted_issuer"`
 }
 
 type OptionsConfig struct {
