@@ -46,10 +46,16 @@ one-time setup that makes the full test matrix runnable with no interaction.
 | Node / npm | ✅ v24.1.0 via nvm4w |
 | `web/dist` | ✅ tracked |
 | **PostgreSQL server** | ❌ **broken install.** `C:\Program Files\PostgreSQL\18` has `postgres.exe`, `initdb.exe` and client tools, but `share\` holds only `i18n` — no `postgres.bki`, no server support files. `initdb` fails immediately; the server cannot start. Effectively client-tools-only |
-| C compiler | ❌ none (`CGO_ENABLED=0`) |
-| Docker | ❌ not installed |
-| xmllint | ❌ not installed |
+| C compiler | ✅ mingw-w64 gcc 16.2.0 (WinLibs, checksum-verified) at `%USERPROFILE%\sdk\mingw64\bin` — enables `go test -race` locally |
+| Docker | ❌ not installed (use the Linux box for containers) |
+| xmllint | ❌ not installed (CMS XSD test self-skips here; runs on the Linux box) |
 | Python 3.13 + pip | ✅ (used by the harness fallback below) |
+
+Put both toolchains on PATH for a shell session:
+`set PATH=%USERPROFILE%\sdk\go1.25.12\bin;%USERPROFILE%\sdk\mingw64\bin;%PATH%`
+Then `mingw32-make check` (build+vet+fmt+test) or `mingw32-make check-race`
+(adds the race detector) runs the full local gate. Windows has no `make`;
+mingw ships `mingw32-make`.
 
 ## 2a. Linux test box (NyxVectorTest, 172.25.221.105)
 

@@ -1,4 +1,4 @@
-.PHONY: ui build test clean dev-ui all install uninstall
+.PHONY: ui build test check check-race clean dev-ui all install uninstall
 
 BINARY   = mcxas
 VERSION  = 0.0.1d
@@ -25,6 +25,23 @@ build:
 
 test:
 	go test ./...
+
+# Full pre-commit gate: build, vet, format-drift (fails on any), and tests.
+check:
+	go build ./...
+	go vet ./...
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then echo "gofmt drift:"; echo "$$unformatted"; exit 1; fi
+	go test ./...
+
+# check plus the race detector. Needs a C compiler (CGO). On the Windows dev
+# machine gcc lives at %USERPROFILE%\sdk\mingw64\bin; on Linux it is packaged.
+# Fails with a clear message rather than silently skipping when CGO is off.
+check-race: check
+	@if [ "$$(go env CGO_ENABLED)" != "1" ] && ! command -v gcc >/dev/null 2>&1; then \
+		echo "check-race needs a C compiler; put gcc on PATH and set CGO_ENABLED=1"; exit 1; \
+	fi
+	CGO_ENABLED=1 go test -race ./...
 
 # Start Vite dev server (proxies API to localhost:8080)
 dev-ui:
