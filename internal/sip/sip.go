@@ -46,8 +46,14 @@ type Server struct {
 	// streamReadTimeoutOverride, when non-zero, replaces defaultStreamReadTimeout.
 	// Tests set it per-Server; production leaves it zero.
 	streamReadTimeoutOverride time.Duration
-	udpDropped                atomic.Uint64
-	tcpRefused                atomic.Uint64
+
+	// clientTx holds in-flight client transactions (RFC 3261 clause 17.1),
+	// keyed branch|METHOD. timerT1Override shortens T1 in tests, per-server
+	// for the same reason as streamReadTimeoutOverride.
+	clientTx        sync.Map
+	timerT1Override time.Duration
+	udpDropped      atomic.Uint64
+	tcpRefused      atomic.Uint64
 }
 
 // Bounds on concurrent work started by the listeners. Every handler can open a
@@ -322,6 +328,10 @@ func (s *Server) handleRaw(ctx context.Context, source, transport string, raw []
 			"source", source,
 			"transport", transport,
 		)
+		// Client transaction layer first: stops retransmissions, ACKs
+		// non-2xx INVITE finals, completes waiters. The application-level
+		// pendingInvites flow below still observes the same response.
+		s.dispatchClientResponse(msg)
 		callID := msg.Header("Call-ID")
 		cseqFields := strings.Fields(msg.Header("CSeq"))
 		if len(cseqFields) >= 2 && strings.EqualFold(cseqFields[len(cseqFields)-1], "INVITE") {
@@ -423,8 +433,9 @@ func (s *Server) sendOptions(ctx context.Context) {
 		return
 	}
 	for _, route := range routes {
+		branch := rfc3261BranchCookie + newToken()
 		req := buildRequest("OPTIONS", s.cfg.MCX.SIPIdentity, []header{
-			{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s", strings.ToUpper(route.Transport), advertiseHost(s.cfg), newToken())},
+			{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(route.Transport), advertiseHost(s.cfg), branch)},
 			{"Max-Forwards", "70"},
 			{"From", fmt.Sprintf("<%s>;tag=%s", s.cfg.MCX.SIPIdentity, newToken())},
 			{"To", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
@@ -433,11 +444,10 @@ func (s *Server) sendOptions(ctx context.Context) {
 			{"Contact", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
 			{"User-Agent", productName},
 		}, nil)
-		if err := s.sendOutbound(ctx, route.Transport, route.Target, []byte(req)); err != nil {
-			slog.Warn("SIP OPTIONS send failed", "target", route.Target, "transport", route.Transport, "err", err)
-		} else {
-			slog.Debug("SIP OPTIONS sent", "target", route.Target, "transport", route.Transport)
-		}
+		// Transacted: Timer E retransmission over UDP, Timer F timeout. The
+		// final response is not awaited; the keepalive only needs delivery.
+		s.sendTransacted(ctx, route.Transport, route.Target, branch, "OPTIONS", []byte(req))
+		slog.Debug("SIP OPTIONS sent", "target", route.Target, "transport", route.Transport)
 	}
 }
 
@@ -1186,8 +1196,9 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	if pai == "" {
 		pai = s.cfg.MCX.SIPIdentity
 	}
+	branch := rfc3261BranchCookie + newToken()
 	hdrs := []header{
-		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s", strings.ToUpper(transport), advertiseHost(s.cfg), newToken())},
+		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(transport), advertiseHost(s.cfg), branch)},
 		{"Max-Forwards", "70"},
 		{"From", fmt.Sprintf("<%s>;tag=%s", s.cfg.MCX.SIPIdentity, localTag)},
 		{"To", fmt.Sprintf("<%s>", memberImpu)},
@@ -1209,10 +1220,11 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	inviteMsg := buildRequest("INVITE", memberImpu, hdrs, []byte(multipartBody))
 
 	slog.Info("RX INVITE sending", "call_id", callID, "member", memberImpu, "target", target, "group_uri", groupURI, "tx_call_id", txCallID)
-	if err := s.sendOutbound(ctx, transport, target, []byte(inviteMsg)); err != nil {
-		slog.Warn("RX INVITE send failed", "call_id", callID, "member", memberImpu, "err", err)
-		return
-	}
+	// Transacted send: Timer A retransmission over UDP, Timer B timeout, and
+	// the transaction layer ACKs a non-2xx final (RFC 3261 17.1.1.3). The
+	// 200 OK is consumed below via pendingInvites, which predates the
+	// transaction layer and still owns dialog-level handling.
+	s.sendTransacted(ctx, transport, target, branch, "INVITE", []byte(inviteMsg))
 
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
@@ -1370,8 +1382,9 @@ func (s *Server) sendRXBYE(ctx context.Context, call store.MCPTTCall) {
 	if call.RemoteTarget != "" {
 		byeReqURI = call.RemoteTarget
 	}
+	branch := rfc3261BranchCookie + newToken()
 	hdrs := []header{
-		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s", strings.ToUpper(transport), advertiseHost(s.cfg), newToken())},
+		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(transport), advertiseHost(s.cfg), branch)},
 		{"Max-Forwards", "70"},
 		{"From", fmt.Sprintf("<%s>;tag=%s", call.InitiatorURI, call.LocalTag)},
 		{"To", fmt.Sprintf("<%s>;tag=%s", call.TargetURI, call.RemoteTag)},
@@ -1386,9 +1399,7 @@ func (s *Server) sendRXBYE(ctx context.Context, call store.MCPTTCall) {
 	}
 	bye := buildRequest("BYE", byeReqURI, hdrs, nil)
 	slog.Info("RX BYE sending", "call_id", call.CallID, "member", call.TargetURI, "group_uri", call.GroupURI)
-	if err := s.sendOutbound(ctx, transport, target, []byte(bye)); err != nil {
-		slog.Warn("RX BYE send failed", "call_id", call.CallID, "err", err)
-	}
+	s.sendTransacted(ctx, transport, target, branch, "BYE", []byte(bye))
 	if err := s.st.UpdateCallState(ctx, call.CallID, "terminated"); err != nil {
 		slog.Warn("RX BYE state update failed", "call_id", call.CallID, "err", err)
 	}
@@ -1425,8 +1436,9 @@ func (s *Server) sendNotify(ctx context.Context, sub store.Subscription, subscri
 	s.notifyCSeq.Store(sub.CallID, cseq)
 
 	logNotifyDialogRoute(sub, reqURI, target, transport, s.notifyRouteSetOrder(), routes)
+	branch := rfc3261BranchCookie + newToken()
 	headers := []header{
-		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s", strings.ToUpper(transport), advertiseHost(s.cfg), newToken())},
+		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(transport), advertiseHost(s.cfg), branch)},
 		{"Max-Forwards", "70"},
 		{"From", from},
 		{"To", to},
@@ -1442,12 +1454,12 @@ func (s *Server) sendNotify(ctx context.Context, sub store.Subscription, subscri
 		headers = append([]header{{"Route", routes[i]}}, headers...)
 	}
 	msg := buildRequest("NOTIFY", reqURI, headers, body)
-	err = s.sendOutbound(ctx, transport, target, []byte(msg))
-	if err == nil {
-		slog.Info("SIP NOTIFY sent", "target", target, "transport", transport, "request_uri", reqURI, "route_count", len(routes), "remote_target", sub.RemoteTarget, "call_id", sub.CallID, "event", sub.Event)
-		slog.Debug("SIP NOTIFY request", "call_id", sub.CallID, "event", sub.Event, "target", target, "message", msg)
-	}
-	return err
+	// Transacted: the transaction layer owns retransmission and timeout, so
+	// there is no synchronous send error to surface here.
+	s.sendTransacted(ctx, transport, target, branch, "NOTIFY", []byte(msg))
+	slog.Info("SIP NOTIFY sent", "target", target, "transport", transport, "request_uri", reqURI, "route_count", len(routes), "remote_target", sub.RemoteTarget, "call_id", sub.CallID, "event", sub.Event)
+	slog.Debug("SIP NOTIFY request", "call_id", sub.CallID, "event", sub.Event, "target", target, "message", msg)
+	return nil
 }
 
 func (s *Server) notifyDialogRoutes(routes []string) []string {
