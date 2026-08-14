@@ -94,14 +94,11 @@ func TestReadSIPMessageRejectsNegativeContentLength(t *testing.T) {
 // A connection that is opened and then left silent must be reclaimed rather
 // than holding a goroutine and socket indefinitely.
 func TestHandleTCPConnClosesSilentConnection(t *testing.T) {
-	restore := sipTCPReadTimeout
-	sipTCPReadTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { sipTCPReadTimeout = restore })
-
 	server, client := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
 
 	s := NewServer(config.Default(), nil)
+	s.streamReadTimeoutOverride = 50 * time.Millisecond
 	done := make(chan struct{})
 	go func() {
 		s.handleStreamConn(context.Background(), server, "tcp")
@@ -143,11 +140,8 @@ func TestServeTCPConnRefusesWhenAtLimit(t *testing.T) {
 }
 
 func TestServeTCPConnReleasesItsSlot(t *testing.T) {
-	restore := sipTCPReadTimeout
-	sipTCPReadTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { sipTCPReadTimeout = restore })
-
 	s := NewServer(config.Default(), nil)
+	s.streamReadTimeoutOverride = 50 * time.Millisecond
 	s.tcpSem = make(chan struct{}, 1)
 
 	server, client := net.Pipe()

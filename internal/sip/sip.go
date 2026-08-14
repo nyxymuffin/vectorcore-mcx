@@ -42,8 +42,12 @@ type Server struct {
 	udpSem     chan struct{}
 	tcpSem     chan struct{}
 	authTokens *tokenValidator
-	udpDropped atomic.Uint64
-	tcpRefused atomic.Uint64
+
+	// streamReadTimeoutOverride, when non-zero, replaces defaultStreamReadTimeout.
+	// Tests set it per-Server; production leaves it zero.
+	streamReadTimeoutOverride time.Duration
+	udpDropped                atomic.Uint64
+	tcpRefused                atomic.Uint64
 }
 
 // Bounds on concurrent work started by the listeners. Every handler can open a
@@ -270,7 +274,7 @@ func (s *Server) handleStreamConn(ctx context.Context, conn net.Conn, transport 
 		// Reset before every message rather than once per connection, so an
 		// active peer is never disconnected mid-conversation while a silent
 		// one is still reclaimed.
-		if err := conn.SetReadDeadline(time.Now().Add(sipTCPReadTimeout)); err != nil {
+		if err := conn.SetReadDeadline(time.Now().Add(s.streamReadTimeout())); err != nil {
 			slog.Warn("SIP TCP set deadline failed", "err", err, "source", conn.RemoteAddr().String())
 			return
 		}
@@ -2174,12 +2178,22 @@ const (
 	maxSIPBodyBytes = 256 << 10
 )
 
-// sipTCPReadTimeout bounds how long a stream connection may go without
+// defaultStreamReadTimeout bounds how long a stream connection may go without
 // delivering a complete message. It is reset before each read, so a peer that
 // is exchanging traffic is unaffected while a connection that is opened and
-// then left silent is reclaimed. A variable rather than a constant so tests can
-// shorten it.
-var sipTCPReadTimeout = 5 * time.Minute
+// then left silent is reclaimed.
+const defaultStreamReadTimeout = 5 * time.Minute
+
+// streamReadTimeout returns the per-server read deadline. It is a method rather
+// than a package global so tests can shorten it on their own Server without a
+// shared variable that a still-running handler goroutine could read while the
+// test's cleanup restores it.
+func (s *Server) streamReadTimeout() time.Duration {
+	if s.streamReadTimeoutOverride > 0 {
+		return s.streamReadTimeoutOverride
+	}
+	return defaultStreamReadTimeout
+}
 
 // readHeaderLine reads one CRLF-terminated header line.
 //
