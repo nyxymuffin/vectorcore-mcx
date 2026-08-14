@@ -1112,28 +1112,24 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	if rtcpPort == 0 {
 		rtcpPort = audioPort + 1
 	}
-	// Audio-only SDP: omitting m=application keeps the INVITE small and prevents
-	// Doubango from loading the tmedia_mcptt session plugin, which sets
-	// lo_held=true on the audio session and silently prevents any SIP response.
-	// Call classification as MCPTT still happens via processing_body_invite()
-	// which parses the mcptt-info XML multipart body and sets ss->media.type
-	// to tmedia_audio_ptt_group_mcptt_with_floor_control.
-	// a=rtcp omitted: RTCP default is RTP port+1 per RFC 3605 §2.1.
+	floorPort := s.cfg.Media.FloorControlPort
+	if floorPort == 0 {
+		floorPort = 40002
+	}
+	// SDP offer toward the terminating member: audio plus the MCPTT floor
+	// control media line (TS 24.380 clause 4.3), so the member negotiates the
+	// control channel rather than the audio-only offer a previous client bug
+	// forced.
 	sdpBody := fmt.Sprintf(
 		"v=0\r\no=- 0 0 IN IP4 %s\r\ns=-\r\nc=IN IP4 %s\r\nt=0 0\r\n"+
 			"m=audio %d RTP/AVP %s\r\n"+
-			"a=sendonly\r\n",
-		host, host, audioPort, audioPayload,
+			"a=sendrecv\r\n"+
+			"m=application %d udp MCPTT\r\n",
+		host, host, audioPort, audioPayload, floorPort,
 	)
 
-	// MCPTT Info XML body: Doubango's tsip_dialog_invite.server.c parses this
-	// XML to classify the call and set ss->media.type.  The exact field names
-	// and element structure matter:
-	//   - <mcpttURI> child (not <uri>) for request-uri and calling-user-id
-	//   - session-type must be "prearranged" for a pre-arranged group call
-	//   - <mcptt-calling-user-id> is required (parser returns false without it)
-	//   - <mcptt-calling-group-id> is required for the "prearranged" branch
-	// XML declaration omitted to save 38 bytes — parsers do not require it.
+	// MCPTT info body classifying the terminating leg as a prearranged group
+	// call (TS 24.379 clause 15.1.4, mcpttinfo schema in Annex F.1).
 	callerURI := initiatorURI
 	if callerURI == "" {
 		callerURI = s.cfg.MCX.SIPIdentity
@@ -1150,8 +1146,7 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		groupURI, callerURI, groupURI,
 	)
 
-	// Single-char boundary saves ~20 bytes across Content-Type header and body markers.
-	const boundary = "b"
+	const boundary = "mcxasboundary"
 	multipartBody := fmt.Sprintf(
 		"--%s\r\nContent-Type: application/sdp\r\n\r\n%s\r\n"+
 			"--%s\r\nContent-Type: application/vnd.3gpp.mcptt-info+xml\r\n\r\n%s\r\n"+
@@ -1200,10 +1195,12 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		{"CSeq", "1 INVITE"},
 		{"Contact", fmt.Sprintf("<%s>", s.advertisedSIPURI(transport))},
 		{"P-Asserted-Identity", fmt.Sprintf("<%s>", pai)},
-		// Answer-Mode: Auto triggers _fsm_cond_bad_auto_call in Doubango's
-		// tsip_dialog_invite.server.c FSM, which sends 200 OK immediately
-		// without waiting for user interaction on the UE.
-		{"Answer-Mode", "Auto"},
+		// Answer-Mode is deliberately not asserted here. Commencement mode is a
+		// property of the terminating participant (TS 24.379 clause 6.2.3), not
+		// something the controlling side forces; the previous hardcoded
+		// "Auto" existed only to drive one client's auto-answer FSM. The
+		// terminating UE decides per its own configuration until the
+		// answer-mode-from-poc-settings work lands.
 		{"Content-Type", fmt.Sprintf(`multipart/mixed;boundary="%s"`, boundary)},
 	}
 	for i := len(inviteRoutes) - 1; i >= 0; i-- {
@@ -1895,6 +1892,17 @@ func (s *Server) sdpAnswer(msg *Message) ([]byte, string) {
 	if len(offerInfo.FloorControl.Payloads) > 0 {
 		floorPayload = offerInfo.FloorControl.Payloads[0]
 	}
+	// TS 24.380 clause 6.4: the answer grants the floor implicitly only when the
+	// offer requested it (mc_implicit_request) and the server is willing to
+	// auto-grant. Previously mc_granted was emitted unconditionally, an MCOP
+	// client accommodation that handed every caller the floor at answer time
+	// regardless of what it asked for. When not granting, the floor-control
+	// media line is still offered so the participant can request the floor over
+	// the control channel.
+	floorFmtp := fmt.Sprintf("a=fmtp:%s MCPTT mc_priority=0;mc_queueing\r\n", floorPayload)
+	if s.cfg.Media.FloorAutoGrant && offerRequestsImplicitFloor(offerInfo) {
+		floorFmtp = fmt.Sprintf("a=fmtp:%s MCPTT mc_priority=0;mc_granted;mc_implicit_request\r\n", floorPayload)
+	}
 	body := "v=0\r\n" +
 		fmt.Sprintf("o=mcxas 0 0 IN IP4 %s\r\n", host) +
 		"s=MCPTT\r\n" +
@@ -1904,8 +1912,19 @@ func (s *Server) sdpAnswer(msg *Message) ([]byte, string) {
 		fmt.Sprintf("a=rtcp:%d IN IP4 %s\r\n", rtcpPort, host) +
 		fmt.Sprintf("a=%s\r\n", direction) +
 		fmt.Sprintf("m=application %d %s %s\r\n", floorPort, floorProto, floorPayload) +
-		fmt.Sprintf("a=fmtp:%s MCPTT mc_priority=0;mc_granted;mc_implicit_request\r\n", floorPayload)
+		floorFmtp
 	return []byte(body), "application/sdp"
+}
+
+// offerRequestsImplicitFloor reports whether the SDP offer's floor-control
+// media requested an implicit floor grant (TS 24.380 clause 6.4).
+func offerRequestsImplicitFloor(offer sdpInfo) bool {
+	for _, attr := range offer.FloorControl.Attributes {
+		if strings.Contains(strings.ToLower(attr), "mc_implicit_request") {
+			return true
+		}
+	}
+	return false
 }
 
 func sdpGrantsImplicitFloor(body []byte) bool {

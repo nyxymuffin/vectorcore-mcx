@@ -918,11 +918,45 @@ func TestSDPAnswerUsesMediaConfig(t *testing.T) {
 		"a=rtcp:41001 IN IP4 192.0.2.54\r\n",
 		"a=sendrecv\r\n",
 		"m=application 41002 udp MCPTT\r\n",
-		"a=fmtp:MCPTT MCPTT mc_priority=0;mc_granted;mc_implicit_request\r\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("SDP answer missing %q:\n%s", want, text)
 		}
+	}
+	// The offer requested no implicit floor, so the answer must not grant one
+	// (TS 24.380 clause 6.4).
+	if strings.Contains(text, "mc_granted") {
+		t.Fatalf("SDP answer granted the floor to an offer that did not request it:\n%s", text)
+	}
+	if !strings.Contains(text, "mc_queueing") {
+		t.Fatalf("SDP answer without an implicit grant should advertise mc_queueing:\n%s", text)
+	}
+}
+
+// An offer that requests an implicit floor grant is granted when auto-grant is
+// on, and withheld when auto-grant is off (TS 24.380 clause 6.4).
+func TestSDPAnswerGrantsFloorOnlyWhenRequestedAndAllowed(t *testing.T) {
+	offer := "INVITE sip:mcptt-as@example.test SIP/2.0\r\n" +
+		"Content-Type: application/sdp\r\n\r\n" +
+		"v=0\r\n" +
+		"m=audio 49170 RTP/AVP 0\r\n" +
+		"m=application 49172 udp MCPTT\r\n" +
+		"a=fmtp:MCPTT mc_implicit_request\r\n"
+	msg, err := Parse([]byte(offer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	granting := config.Default()
+	granting.Media.FloorAutoGrant = true
+	if body, _ := NewServer(granting, nil).sdpAnswer(msg); !strings.Contains(string(body), "mc_granted") {
+		t.Fatalf("an implicit-request offer with auto-grant on must be granted:\n%s", body)
+	}
+
+	withheld := config.Default()
+	withheld.Media.FloorAutoGrant = false
+	if body, _ := NewServer(withheld, nil).sdpAnswer(msg); strings.Contains(string(body), "mc_granted") {
+		t.Fatalf("auto-grant off must not grant the floor:\n%s", body)
 	}
 }
 
