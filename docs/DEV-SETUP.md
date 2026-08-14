@@ -51,6 +51,37 @@ one-time setup that makes the full test matrix runnable with no interaction.
 | xmllint | ❌ not installed |
 | Python 3.13 + pip | ✅ (used by the harness fallback below) |
 
+## 2a. Linux test box (NyxVectorTest, 172.25.221.105)
+
+Debian 12.15, 6 vCPU, 8 GB RAM, ESXi guest — provisioned 2026-08-14 as the
+unattended Linux test target. Keyed SSH only (dedicated ed25519 key
+`~/.ssh/mcx-dev` on the dev machine, authorised for `nyx` and `root`; nyx is in
+`sudo` and `docker`). Toolchain: Go 1.25.12 (checksum-verified, `/usr/local/go`),
+docker.io, gcc 12, xmllint, git, rsync, build-essential.
+
+**Verified matrix on this box (2026-08-14), repo at `5a9f3aa`:** build, vet,
+`gofmt` clean; full suite passes; the XSD schema test **runs** (xmllint present)
+instead of skipping; and `CGO_ENABLED=1 go test -race ./...` is **clean — zero
+data races** across every package. The one race the detector found on its first
+run (`sipTCPReadTimeout`, a test-mutated global) is fixed in `5a9f3aa`.
+
+**Operational caveat — the network path, not the box.** A security appliance
+sits between the dev machine's NAT'd egress (`172.16.99.171`) and the box's
+subnet (`172.25.x`). It periodically resets SSH sessions and, after repeated
+reconnects, temporarily blocks the source IP. The box itself is unaffected
+(sshd 19h uptime through the "outages", no OOM). Two consequences for automation:
+
+1. **Never stream large output over SSH, and never depend on a long-lived
+   session.** Run heavy commands detached (`nohup … > /tmp/out.log 2>&1 &`) and
+   fetch only small summaries. This is how the race result above was obtained
+   after live sessions kept getting cut.
+2. **Durable fix:** whitelist `172.16.99.171` on the appliance, or place the box
+   on the same segment as the dev egress. Until then, expect intermittent
+   session drops and back off (do not rapid-retry — that extends the block).
+
+Do not reconfigure sshd on this box remotely without console standby: an early
+attempt to harden it coincided with a path reset and looked like a lockout.
+
 ---
 
 ## 3. The plan
