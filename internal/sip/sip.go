@@ -56,8 +56,12 @@ type Server struct {
 	// sessionIdentities maps Call-ID to the allocated MCPTT session identity
 	// (TS 24.379 clause 4.5) for the lifetime of the group session.
 	sessionIdentities sync.Map
-	udpDropped        atomic.Uint64
-	tcpRefused        atomic.Uint64
+
+	// remoteSessions maps an originating leg's Call-ID to the relayed dialog
+	// state toward a remote controlling function (slice 5).
+	remoteSessions sync.Map
+	udpDropped     atomic.Uint64
+	tcpRefused     atomic.Uint64
 }
 
 // Bounds on concurrent work started by the listeners. Every handler can open a
@@ -749,14 +753,23 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 
 	// The controlling function of the target group decides admission
 	// (TS 24.379 clause 6.3.3); this participating side only relays the
-	// verdict. Resolution is per group so a remotely homed group later binds
-	// to a SIP implementation of the same seam.
+	// verdict. Resolution is per group so a remotely homed group binds to the
+	// SIP-speaking implementation of the same seam.
 	controlling := s.controllingFor(groupURI)
 	call := originatingGroupCall{
 		CallID:       callID,
 		InitiatorURI: initiatorURI,
 		GroupURI:     groupURI,
 		SDP:          sdpInfo,
+	}
+	if rc, isRemote := controlling.(remoteControlling); isRemote {
+		// A remotely homed group: this server is purely the originating
+		// participating function, and the whole exchange is relayed
+		// (clauses 10.1.1.3.1.1, 6.3.2.1.3, 6.3.2.1.5.2).
+		s.uasInvites.Store(callID, &uasInviteState{msg: msg, send: send, tag: localTag})
+		s.respond(send, msg, 100, "Trying", nil, nil)
+		s.relayToRemoteControlling(ctx, send, msg, rc, call, localTag, transport)
+		return
 	}
 	if verdict := controlling.AdmitOriginatingCall(ctx, call); !verdict.Admitted {
 		slog.Warn("MCPTT group INVITE rejected",

@@ -108,6 +108,16 @@ func (c Config) validateListeners() []error {
 		problems = append(problems, errors.New(
 			"sip.auth.trusted_jwks_file: required when require_service_authorization is true; without keys every request would be refused"))
 	}
+	for i, rg := range c.SIP.RemoteGroups {
+		if strings.TrimSpace(rg.GroupURI) == "" || strings.TrimSpace(rg.ControllingPSI) == "" {
+			problems = append(problems, fmt.Errorf(
+				"sip.remote_groups[%d]: group_uri and controlling_psi are both required", i))
+		}
+		if t := strings.ToLower(strings.TrimSpace(rg.Transport)); t != "" && t != "udp" && t != "tcp" && t != "tls" {
+			problems = append(problems, fmt.Errorf(
+				"sip.remote_groups[%d].transport: %q is not valid (want udp, tcp or tls)", i, rg.Transport))
+		}
+	}
 	if strings.TrimSpace(c.SIP.TLSListen) != "" {
 		if err := validateListenAddr("sip.tls_listen", c.SIP.TLSListen); err != nil {
 			problems = append(problems, err)

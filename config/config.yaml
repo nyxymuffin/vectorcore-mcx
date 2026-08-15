@@ -26,6 +26,16 @@ sip:
   options:
     enabled: false
     interval: "30s"
+  # Groups homed at a remote controlling MCPTT function (a partner MC system,
+  # an IWF toward an LMR system, or a gateway server). Calls to a listed group
+  # are relayed per TS 24.379 clauses 10.1.1.3.1.1 / 6.3.2.1.3: this server
+  # acts as the originating participating function only. Groups not listed
+  # here home locally.
+  # remote_groups:
+  #   - group_uri: "sip:interop_group@partner.example"
+  #     controlling_psi: "sip:mcptt-ctrl@partner.example"
+  #     target: "203.0.113.7:5060"
+  #     transport: "udp" # udp | tcp | tls
   auth:
     # Service authorization (TS 33.180 clause 5.1.3.2.3): validate the access
     # token carried in the service-authorization PUBLISH before believing the

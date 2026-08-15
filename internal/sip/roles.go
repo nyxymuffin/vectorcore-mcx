@@ -60,6 +60,9 @@ type controllingFunction interface {
 // Every group homes locally today; a remote SIP binding keyed by group
 // configuration replaces this lookup's answer, not its callers.
 func (s *Server) controllingFor(groupURI string) controllingFunction {
+	if rg, ok := s.remoteGroupFor(groupURI); ok {
+		return remoteControlling{s: s, cfg: rg}
+	}
 	return localControlling{s: s}
 }
 

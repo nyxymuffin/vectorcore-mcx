@@ -44,7 +44,10 @@ type SIPConfig struct {
 	RecordRoute         bool          `yaml:"record_route"`
 	NotifyRouteSetOrder string        `yaml:"notify_route_set_order"`
 	Options             OptionsConfig `yaml:"options"`
-	Auth                SIPAuthConfig `yaml:"auth"`
+	// RemoteGroups homes specific groups at another MC system's controlling
+	// function (design D3). Groups not listed here home locally.
+	RemoteGroups []RemoteGroupConfig `yaml:"remote_groups"`
+	Auth         SIPAuthConfig       `yaml:"auth"`
 }
 
 // SIPAuthConfig controls service authorization on the SIP interface
@@ -58,6 +61,20 @@ type SIPAuthConfig struct {
 	TrustedJWKSFile string `yaml:"trusted_jwks_file"`
 	// TrustedIssuer, when set, must equal the token's iss claim.
 	TrustedIssuer string `yaml:"trusted_issuer"`
+}
+
+// RemoteGroupConfig binds one group to a remote controlling MCPTT function
+// (TS 24.379 clause 6.3.3 at a peer system, an IWF, or a gateway server).
+type RemoteGroupConfig struct {
+	// GroupURI is the MCPTT group identity homed remotely.
+	GroupURI string `yaml:"group_uri"`
+	// ControllingPSI is the public service identity of the remote controlling
+	// function; it becomes the Request-URI of the forwarded INVITE.
+	ControllingPSI string `yaml:"controlling_psi"`
+	// Target is the host:port the INVITE is sent to.
+	Target string `yaml:"target"`
+	// Transport is udp, tcp or tls; empty means udp.
+	Transport string `yaml:"transport"`
 }
 
 type OptionsConfig struct {
