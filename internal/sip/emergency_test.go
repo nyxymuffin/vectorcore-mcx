@@ -203,3 +203,40 @@ func TestImminentPerilStateAndEmergencyOverride(t *testing.T) {
 		t.Fatalf("state = %q, want emergency after upgrade", got)
 	}
 }
+
+// TNG2 (clause 6.3.3.1.16): the in-progress emergency state expires after
+// the configured group time limit and the group returns to normal priority.
+func TestTNG2ExpiresInProgressEmergencyState(t *testing.T) {
+	s, st := groupCallFixture(t)
+	allowEmergency(t, st, true, true)
+	s.cfg.SIP.Emergency.GroupTimeLimitSeconds = 1
+
+	responses := collectResponses(t, s, emergencyInvite("tng2-1", "emergency-ind"))
+	if len(responses) != 3 || !strings.HasPrefix(responses[2], "SIP/2.0 200") {
+		t.Fatalf("responses = %v, want 100/180/200", responses)
+	}
+	if got := s.groupPriorityState("sip:test_group@example.test"); got != "emergency" {
+		t.Fatalf("state = %q, want emergency", got)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	if got := s.groupPriorityState("sip:test_group@example.test"); got != "" {
+		t.Fatalf("state = %q, want cleared after TNG2 expiry", got)
+	}
+}
+
+// With the limit disabled (0) the emergency state persists.
+func TestTNG2DisabledKeepsEmergencyState(t *testing.T) {
+	s, st := groupCallFixture(t)
+	allowEmergency(t, st, true, true)
+	s.cfg.SIP.Emergency.GroupTimeLimitSeconds = 0
+
+	responses := collectResponses(t, s, emergencyInvite("tng2-off", "emergency-ind"))
+	if len(responses) != 3 {
+		t.Fatalf("responses = %v", responses)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := s.groupPriorityState("sip:test_group@example.test"); got != "emergency" {
+		t.Fatalf("state = %q, want emergency to persist without TNG2", got)
+	}
+}

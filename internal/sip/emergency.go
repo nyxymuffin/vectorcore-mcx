@@ -2,7 +2,9 @@ package sip
 
 import (
 	"context"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
 )
@@ -64,13 +66,31 @@ func priorityRejectBody() (string, string) {
 		"application/vnd.3gpp.mcptt-info+xml"
 }
 
+// priorityState is one group's in-progress emergency or imminent peril
+// state. The deadline realises TNG2 (in-progress emergency group call timer,
+// TS 24.379 clause 6.3.3.1.16): when it passes, the state falls back to
+// normal. A zero deadline never expires.
+type priorityState struct {
+	kind     string
+	deadline time.Time
+}
+
 // groupPriorityState returns the in-progress emergency/imminent-peril state
-// of a group: "emergency", "imminent" or "".
+// of a group: "emergency", "imminent" or "". An expired TNG2 clears the
+// state on read (step 1 of clause 6.3.3.1.16).
 func (s *Server) groupPriorityState(groupURI string) string {
-	if v, ok := s.inProgressPriority.Load(strings.ToLower(strings.TrimSpace(groupURI))); ok {
-		return v.(string)
+	key := strings.ToLower(strings.TrimSpace(groupURI))
+	v, ok := s.inProgressPriority.Load(key)
+	if !ok {
+		return ""
 	}
-	return ""
+	st := v.(priorityState)
+	if !st.deadline.IsZero() && time.Now().UTC().After(st.deadline) {
+		s.inProgressPriority.Delete(key)
+		slog.Info("MCPTT in-progress emergency state expired (TNG2)", "group_uri", groupURI, "kind", st.kind)
+		return ""
+	}
+	return st.kind
 }
 
 func (s *Server) setGroupPriorityState(groupURI, state string) {
@@ -79,7 +99,13 @@ func (s *Server) setGroupPriorityState(groupURI, state string) {
 		s.inProgressPriority.Delete(key)
 		return
 	}
-	s.inProgressPriority.Store(key, state)
+	st := priorityState{kind: state}
+	if state == "emergency" {
+		if limit := s.cfg.SIP.Emergency.GroupTimeLimitSeconds; limit > 0 {
+			st.deadline = time.Now().UTC().Add(time.Duration(limit) * time.Second)
+		}
+	}
+	s.inProgressPriority.Store(key, st)
 }
 
 // resourcePriorityFor returns the Resource-Priority value the controlling

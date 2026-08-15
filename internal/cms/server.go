@@ -624,6 +624,16 @@ func (s *Server) ueInstanceIDURN() string {
 
 func (s *Server) defaultServiceConfig() string {
 	realm := s.cfg.IMS.Realm
+	// TS 24.484: the <group-time-limit> of <emergency-call> is the TNG2
+	// value the SIP side enforces (TS 24.379 clause 6.3.3.1.16); the
+	// advertised document matches the enforcement configuration.
+	emergencyCall := ""
+	if limit := s.cfg.SIP.Emergency.GroupTimeLimitSeconds; limit > 0 {
+		emergencyCall = fmt.Sprintf(`
+      <emergency-call>
+        <group-time-limit>PT%dS</group-time-limit>
+      </emergency-call>`, limit)
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <service-configuration-info xmlns="urn:3gpp:ns:mcpttServiceConfig:1.0">
   <service-configuration-params domain=%q>
@@ -660,6 +670,7 @@ func (s *Server) defaultServiceConfig() string {
         <C55-connect>3</C55-connect>
         <C56-disconnect>3</C56-disconnect>
       </fc-timers-counters>
+%s
       <emergency-resource-priority>
         <resource-priority-namespace>mcptt</resource-priority-namespace>
         <resource-priority-priority>0</resource-priority-priority>
@@ -674,7 +685,7 @@ func (s *Server) defaultServiceConfig() string {
       </normal-resource-priority>
     </on-network>
   </service-configuration-params>
-</service-configuration-info>`, realm)
+</service-configuration-info>`, realm, emergencyCall)
 }
 
 func (s *Server) defaultGMSGroup(ctx context.Context, path string) string {

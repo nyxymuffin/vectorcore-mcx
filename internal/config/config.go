@@ -57,6 +57,17 @@ type SIPConfig struct {
 	Auth         SIPAuthConfig       `yaml:"auth"`
 	Adhoc        AdhocConfig         `yaml:"adhoc"`
 	PrivateCall  PrivateCallConfig   `yaml:"private_call"`
+	Emergency    EmergencyConfig     `yaml:"emergency"`
+}
+
+// EmergencyConfig stands in for the <emergency-call> elements of the MCPTT
+// service configuration document (TS 24.484).
+type EmergencyConfig struct {
+	// GroupTimeLimitSeconds is the <group-time-limit>: the TNG2 in-progress
+	// emergency group call timer value (TS 24.379 clause 6.3.3.1.16).
+	// 0 disables the timer and the emergency state persists until the
+	// group's last leg ends.
+	GroupTimeLimitSeconds int `yaml:"group_time_limit_seconds"`
 }
 
 // AdhocConfig stands in for the ad hoc group call elements of the MCPTT
@@ -274,6 +285,8 @@ func Default() Config {
 	cfg := Config{}
 	cfg.SIP.RecordRoute = true
 	cfg.SIP.Adhoc.Enabled = true
+	// TNG2 default (TS 24.379 clause 6.3.3.1.16); explicit 0 disables.
+	cfg.SIP.Emergency.GroupTimeLimitSeconds = 300
 	cfg.Media.Enabled = true
 	cfg.Media.FloorAutoGrant = true
 	cfg.applyDefaults()
