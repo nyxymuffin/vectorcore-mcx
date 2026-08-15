@@ -125,3 +125,46 @@ validation for service authorisation is done.
 4. IdMS: FOLLOW THE SPEC — grow the shim into a conformant OIDC provider
    per TS 24.482 / 33.180 (user authentication, scopes, PKCE, refresh);
    the trusted-JWKS knob stays so an external IdM remains possible.
+
+## F. Open question for Nyx: TrK key wrap length (TS 33.180)
+
+The KMS provisioning interface is implemented (Annex D: init, keyprov,
+certcache, cert) and issues real ECCSI and SAKKE key material. What is not
+implemented is the clause D.2.2 security extension, where the key material
+in a KmsKeySet is wrapped under the shared 256-bit Transport Key instead of
+being carried as plain hexBinary.
+
+The blocker is a length mismatch in the specification itself. Clause 9.3.4.2
+and every example in clause D.3.4 identify the wrapping algorithm as
+'http://www.w3.org/2001/04/xmlenc#kw-aes256', which clause 9.3.4.2 states is
+"the AES-256 key wrap algorithm as defined in RFC 3394 [34]". RFC 3394
+requires the plaintext to be a whole number of 64-bit blocks. The three
+values that need wrapping are not:
+
+  UserDecryptKey    (SAKKE RSK)  257 octets  = 0x04 || x || y, 128-octet
+                                               coordinates (RFC 6508 cl. 4)
+  UserPubTokenPVT   (ECCSI PVT)   65 octets  = 0x04 || x || y, 32-octet
+                                               coordinates (RFC 6507 cl. 3.2)
+  UserSigningKeySSK (ECCSI SSK)   32 octets  — this one does wrap cleanly
+
+So two of the three cannot be wrapped by the named algorithm as written.
+The plausible readings are (a) drop the constant 0x04 uncompressed-form
+prefix before wrapping, giving 256 and 64 octets, since a receiver knows
+the form and can restore it; (b) use AES key wrap with padding (RFC 5649),
+which handles arbitrary lengths but is a different algorithm than the one
+the URI names; or (c) some deployment convention not written down here.
+
+This is a wire format, so guessing it wrong means key material no client can
+unwrap. Until it is settled the interface carries key material as
+KeyContentType hexBinary over the mandatory HTTPS of clause D.1, which is
+conformant for non-public-safety use; clause 5.3.3 step 2 says the TrK
+wrapping is what public safety use requires. Worth checking against a real
+KMS implementation or an MCX interoperability profile before choosing.
+
+Also still open in this area: the optional HMAC-SHA256 XML signature over
+KMS requests and responses (clause D.2.2), KMS Lookup and Redirect
+(D.2.7/D.2.8, D.4), and the MIKEY-SAKKE key distribution over SIP
+(clauses 5.4 to 5.7). That last one needs the Tate-Lichtenbaum pairing of
+RFC 6508 clause 3.2, which the KMS itself does not need but an MCX Server
+does, because CSK upload requires the server to decrypt a SAKKE payload
+addressed to its own MDSI identity.
