@@ -217,10 +217,6 @@ type KMSConfig struct {
 	// serving the MCPTT user", which is not always the same URI as
 	// mcx.sip_identity; empty means mcx.sip_identity.
 	ServerKeyIdentity string `yaml:"server_key_identity"`
-	// ServerIdentities are the identities a client may request key
-	// material for besides its own, which is how the group management
-	// server identity of clause 5.7.1 gets provisioned.
-	ServerIdentities []string `yaml:"server_identities"`
 }
 
 type MediaConfig struct {

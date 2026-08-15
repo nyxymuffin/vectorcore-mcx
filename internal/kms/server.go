@@ -303,19 +303,17 @@ func (s *Server) respondKeyProv(w http.ResponseWriter, r *http.Request, identity
 }
 
 // mayProvision decides whether the authenticated client may ask for key
-// material bound to another identity. A user may provision their own
-// identities; the group management server identity is provisioned for
-// the server itself (clause 5.7.1), which is configured explicitly.
+// material bound to a named identity.
+//
+// Only its own. Every entity TS 33.180 describes as a key management
+// client is provisioned for itself: the MC UE for its MC service ID
+// (clause 5.3.3), the MCX Server for its MDSI (clause 5.4), the group
+// management server for "the GMS Server URI" (clause 5.7.1). Nothing in
+// the specification has one entity collect another's key material, and
+// the material in question is the SAKKE Receiver Secret Key, which
+// decrypts every GMK, PCK and CSK ever addressed to that identity.
 func (s *Server) mayProvision(identity, requested string) bool {
-	if strings.EqualFold(identity, requested) {
-		return true
-	}
-	for _, allowed := range s.cfg.KMS.ServerIdentities {
-		if strings.EqualFold(identity, allowed) {
-			return true
-		}
-	}
-	return false
+	return strings.EqualFold(identity, requested)
 }
 
 // respondCertCache answers a CertCache request with the certificates of

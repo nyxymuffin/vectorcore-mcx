@@ -30,7 +30,6 @@ func kmsFixture(t *testing.T) *Server {
 		KMSID:            "VectorCoreKMS",
 		KeyMaterialFile:  filepath.Join(t.TempDir(), "domain-keys.txt"),
 		KeyPeriodSeconds: 2592000,
-		ServerIdentities: []string{"sip:gms@example.test"},
 	}
 	s, err := NewServer(cfg)
 	if err != nil {
@@ -199,11 +198,18 @@ func TestKeyProvRefusesAnotherIdentity(t *testing.T) {
 		t.Fatalf("status = %d, want 403; body: %s", rr.Code, rr.Body.String())
 	}
 
-	// A configured server identity is the documented exception: a group
-	// management server is provisioned for its own URI (clause 5.7.1).
+	// There is no exception for servers. A group management server is
+	// provisioned for its own URI (clause 5.7.1), not for its members':
+	// the key it would collect is the one that decrypts everything ever
+	// sent to them.
 	rr = post(t, s, RootPath+"/keyprov/sip%3Auser%40example.test", "", "sip:gms@example.test")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("a server collected another user's key material: %d %s", rr.Code, rr.Body.String())
+	}
+	// It provisions itself as any other client does.
+	rr = post(t, s, RootPath+"/keyprov/sip%3Agms%40example.test", "", "sip:gms@example.test")
 	if rr.Code != http.StatusOK {
-		t.Fatalf("server identity refused: %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("a server could not provision itself: %d %s", rr.Code, rr.Body.String())
 	}
 }
 
