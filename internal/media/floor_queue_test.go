@@ -182,3 +182,96 @@ func TestUnqueuedSecondRequestStillDenied(t *testing.T) {
 		t.Fatalf("subtype = %d, want deny", got)
 	}
 }
+
+// Timer T1 (TS 24.380 clause 6.3.4.4.3): a granted talker that stops sending
+// RTP loses the floor and the leg goes idle.
+func TestT1ReleasesSilentTalker(t *testing.T) {
+	st, err := sqlite.Open(t.TempDir() + "/mcxas.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+
+	cfg := config.Default()
+	cfg.Media.FloorT1Seconds = 1
+	o := NewObserver(cfg, st)
+
+	group := "sip:t1g@example.test"
+	if _, err := st.UpsertCall(ctx, store.MCPTTCall{
+		CallID: "t1-holder", State: "answered", GroupURI: group,
+		FloorControlIP: "127.0.0.1", FloorControlPort: 43001,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pc := &fakePacketConn{}
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 43001}
+	o.recordPacket(ctx, pc, "floor", addr, floorMessage(mcpttFloorRequest, 0x0000cccc, nil))
+	call, _ := st.GetCall(ctx, "t1-holder")
+	if call.FloorState != "granted" {
+		t.Fatalf("floor state = %q, want granted", call.FloorState)
+	}
+
+	// Within T1 nothing happens.
+	o.sweepSilentTalkers(ctx, pc)
+	call, _ = st.GetCall(ctx, "t1-holder")
+	if call.FloorState != "granted" {
+		t.Fatal("T1 fired early")
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	pc.writes = nil
+	o.sweepSilentTalkers(ctx, pc)
+
+	call, _ = st.GetCall(ctx, "t1-holder")
+	if call.FloorState != "idle" || call.FloorHolder != "" {
+		t.Fatalf("floor state = %q holder=%q, want idle/cleared", call.FloorState, call.FloorHolder)
+	}
+	idleSeen := false
+	for _, w := range pc.writes {
+		if ev, ok := parseMCPTTFloorEvent(w.data); ok && ev.Subtype == mcpttFloorIdle {
+			idleSeen = true
+		}
+	}
+	if !idleSeen {
+		t.Fatalf("no Floor Idle sent to the silent talker; writes: %d", len(pc.writes))
+	}
+}
+
+// RTP from the talker restarts T1 (clause 6.3.4.4.5 step 2 - the sweep keys
+// off last_rtp_at, which every RTP packet refreshes).
+func TestT1RestartedByRTP(t *testing.T) {
+	st, err := sqlite.Open(t.TempDir() + "/mcxas.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+
+	cfg := config.Default()
+	cfg.Media.FloorT1Seconds = 1
+	o := NewObserver(cfg, st)
+
+	if _, err := st.UpsertCall(ctx, store.MCPTTCall{
+		CallID: "t1-alive", State: "answered", GroupURI: "sip:t1g2@example.test",
+		AudioIP: "127.0.0.1", AudioPort: 43101,
+		FloorControlIP: "127.0.0.1", FloorControlPort: 43102,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pc := &fakePacketConn{}
+	o.recordPacket(ctx, pc, "floor", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 43102},
+		floorMessage(mcpttFloorRequest, 0x0000dddd, nil))
+
+	time.Sleep(700 * time.Millisecond)
+	// RTP keeps the talker alive.
+	rtp := []byte{0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xdd, 0xdd}
+	o.recordPacket(ctx, pc, "rtp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 43101}, rtp)
+
+	time.Sleep(500 * time.Millisecond)
+	o.sweepSilentTalkers(ctx, pc)
+	call, _ := st.GetCall(ctx, "t1-alive")
+	if call.FloorState != "granted" {
+		t.Fatalf("floor state = %q, want granted (T1 restarted by RTP)", call.FloorState)
+	}
+}

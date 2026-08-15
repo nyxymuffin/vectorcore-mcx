@@ -142,8 +142,13 @@ type MediaConfig struct {
 	FloorControlPort          int    `yaml:"floor_control_port"`
 	FloorAutoGrant            bool   `yaml:"floor_auto_grant"`
 	FloorGrantDurationSeconds int    `yaml:"floor_grant_duration_seconds"`
-	LogPackets                bool   `yaml:"log_packets"`
-	LogPacketInterval         int64  `yaml:"log_packet_interval"`
+	// FloorT1Seconds is timer T1 (End of RTP media) of TS 24.380 clause
+	// 6.3.4.4.3, one instance per granted talker: a talker silent this long
+	// loses the floor. Matches the <T1-end-of-rtp-media> the generated
+	// service configuration advertises (default 5). -1 disables the sweep.
+	FloorT1Seconds    int   `yaml:"floor_t1_seconds"`
+	LogPackets        bool  `yaml:"log_packets"`
+	LogPacketInterval int64 `yaml:"log_packet_interval"`
 }
 
 type DatabaseConfig struct {
@@ -351,6 +356,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Media.FloorControlPort == 0 {
 		c.Media.FloorControlPort = 40002
+	}
+	if c.Media.FloorT1Seconds == 0 {
+		// The generated service configuration advertises PT5S.
+		c.Media.FloorT1Seconds = 5
 	}
 	if c.Media.FloorGrantDurationSeconds == 0 {
 		c.Media.FloorGrantDurationSeconds = 30

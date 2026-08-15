@@ -63,6 +63,22 @@ func (o *Observer) listen(ctx context.Context, kind string, port int) error {
 	}
 	defer pc.Close()
 	slog.Info("MCPTT media observer listening", "kind", kind, "addr", addr)
+	if kind == "floor" {
+		// The T1 (End of RTP media) sweep sends its revocations from the
+		// floor control socket (TS 24.380 clause 6.3.4.4.3).
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					o.sweepSilentTalkers(ctx, pc)
+				}
+			}
+		}()
+	}
 	go func() {
 		<-ctx.Done()
 		pc.Close()

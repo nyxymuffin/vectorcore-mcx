@@ -129,6 +129,11 @@ func (c Config) validateListeners() []error {
 			"sip.adhoc.max_call_duration_seconds: %d is not valid (want 0 to disable, or a positive duration)",
 			c.SIP.Adhoc.MaxCallDurationSeconds))
 	}
+	if c.Media.FloorT1Seconds < -1 || c.Media.FloorT1Seconds == 0 {
+		problems = append(problems, fmt.Errorf(
+			"media.floor_t1_seconds: %d is not valid (want a positive duration, or -1 to disable)",
+			c.Media.FloorT1Seconds))
+	}
 	if c.SIP.Emergency.GroupTimeLimitSeconds < 0 {
 		problems = append(problems, fmt.Errorf(
 			"sip.emergency.group_time_limit_seconds: %d is not valid (want 0 to disable TNG2, or a positive duration)",
