@@ -640,7 +640,7 @@ func (s *Server) defaultServiceConfig() string {
     <common>
       <min-length-alias>1</min-length-alias>
     </common>
-    <on-network>
+    <on-network>%s
       <num-levels-priority-hierarchy>15</num-levels-priority-hierarchy>
       <transmit-time>
         <time-limit>PT300S</time-limit>
@@ -670,7 +670,6 @@ func (s *Server) defaultServiceConfig() string {
         <C55-connect>3</C55-connect>
         <C56-disconnect>3</C56-disconnect>
       </fc-timers-counters>
-%s
       <emergency-resource-priority>
         <resource-priority-namespace>mcptt</resource-priority-namespace>
         <resource-priority-priority>0</resource-priority-priority>
