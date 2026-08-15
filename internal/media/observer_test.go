@@ -8,104 +8,89 @@ import (
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
 )
 
+// Floor Granted per clause 8.2.5: server SSRC in the header, Duration,
+// Floor Priority, the granted participant's audio SSRC (field 14) and the
+// Floor Indicator.
 func TestBuildMCPTTFloorGranted(t *testing.T) {
-	packet := buildMCPTTFloorGranted(0x11223344, 45, floorIndicatorNormal)
+	packet := buildMCPTTFloorGranted(0x11223344, 45, floorIndicatorNormal, 7)
 
-	if len(packet) != 20 {
-		t.Fatalf("len=%d, want 20", len(packet))
-	}
 	if got := packet[0] & 0x1f; got != mcpttFloorGranted {
 		t.Fatalf("subtype=%d, want %d", got, mcpttFloorGranted)
 	}
 	if packet[1] != rtcpPacketTypeAPP {
 		t.Fatalf("packet type=%d, want %d", packet[1], rtcpPacketTypeAPP)
 	}
-	if got := binary.BigEndian.Uint16(packet[2:4]); got != 4 {
-		t.Fatalf("rtcp length=%d, want 4", got)
-	}
-	if got := binary.BigEndian.Uint32(packet[4:8]); got != 0x11223344 {
-		t.Fatalf("ssrc=%x, want 11223344", got)
+	if got := binary.BigEndian.Uint32(packet[4:8]); got != serverFloorSSRC {
+		t.Fatalf("header ssrc=%x, want the server's %x", got, serverFloorSSRC)
 	}
 	if got := string(packet[8:12]); got != "MCPT" {
 		t.Fatalf("app name=%q, want MCPT", got)
 	}
-	if packet[12] != fldDuration || packet[13] != 2 {
-		t.Fatalf("duration field header=%x %x, want %x 02", packet[12], packet[13], fldDuration)
-	}
-	if got := binary.BigEndian.Uint16(packet[14:16]); got != 45 {
-		t.Fatalf("duration=%d, want 45", got)
-	}
-	if packet[16] != fldFloorIndicator || packet[17] != 2 {
-		t.Fatalf("floor indicator header=%x %x, want %x 02", packet[16], packet[17], fldFloorIndicator)
-	}
-	if got := binary.BigEndian.Uint16(packet[18:20]); got != mcpttNormalCall {
-		t.Fatalf("floor indicator=%x, want %x", got, mcpttNormalCall)
+	var duration uint16
+	var priority uint8
+	var grantedSSRC uint32
+	var indicator uint16
+	walkFloorFields(packet[12:], func(id byte, value []byte) {
+		switch id {
+		case fldDuration:
+			duration = binary.BigEndian.Uint16(value[:2])
+		case fldFloorPriority:
+			priority = value[0]
+		case fldAudioSSRC:
+			grantedSSRC = binary.BigEndian.Uint32(value[:4])
+		case fldFloorIndicator:
+			indicator = binary.BigEndian.Uint16(value[:2])
+		}
+	})
+	if duration != 45 || priority != 7 || grantedSSRC != 0x11223344 || indicator != floorIndicatorNormal {
+		t.Fatalf("fields: duration=%d priority=%d ssrc=%x indicator=%x", duration, priority, grantedSSRC, indicator)
 	}
 }
 
+// Floor Deny per clause 8.2.6 carries the mandatory Reject Cause field.
 func TestBuildMCPTTFloorDeny(t *testing.T) {
-	packet := buildMCPTTFloorDeny(0x11223344)
-
-	if len(packet) != 12 {
-		t.Fatalf("len=%d, want 12", len(packet))
-	}
+	packet := buildMCPTTFloorDeny(rejectCauseAnotherHasPermission)
 	if got := packet[0] & 0x1f; got != mcpttFloorDeny {
 		t.Fatalf("subtype=%d, want %d", got, mcpttFloorDeny)
 	}
-	if packet[1] != rtcpPacketTypeAPP {
-		t.Fatalf("packet type=%d, want %d", packet[1], rtcpPacketTypeAPP)
+	if got := binary.BigEndian.Uint32(packet[4:8]); got != serverFloorSSRC {
+		t.Fatalf("header ssrc=%x, want server", got)
 	}
-	if got := binary.BigEndian.Uint16(packet[2:4]); got != 2 {
-		t.Fatalf("rtcp length=%d, want 2", got)
+	var cause uint16
+	walkFloorFields(packet[12:], func(id byte, value []byte) {
+		if id == fldRejectCause {
+			cause = binary.BigEndian.Uint16(value[:2])
+		}
+	})
+	if cause != rejectCauseAnotherHasPermission {
+		t.Fatalf("reject cause=%d, want 1", cause)
 	}
-	if got := binary.BigEndian.Uint32(packet[4:8]); got != 0x11223344 {
-		t.Fatalf("ssrc=%x, want 11223344", got)
+}
+
+// Floor Revoke per clause 8.2.10 with cause #2 (media burst too long).
+func TestBuildMCPTTFloorRevoke(t *testing.T) {
+	packet := buildMCPTTFloorRevoke(revokeCauseMediaBurstTooLong)
+	if got := packet[0] & 0x1f; got != mcpttFloorRevoke {
+		t.Fatalf("subtype=%d, want revoke", got)
 	}
-	if got := string(packet[8:12]); got != "MCPT" {
-		t.Fatalf("app name=%q, want MCPT", got)
+	var cause uint16
+	walkFloorFields(packet[12:], func(id byte, value []byte) {
+		if id == fldRejectCause {
+			cause = binary.BigEndian.Uint16(value[:2])
+		}
+	})
+	if cause != revokeCauseMediaBurstTooLong {
+		t.Fatalf("cause=%d, want 2", cause)
 	}
 }
 
 func TestBuildMCPTTFloorIdle(t *testing.T) {
-	packet := buildMCPTTFloorIdle(0x11223344)
-
-	if len(packet) != 12 {
-		t.Fatalf("len=%d, want 12", len(packet))
-	}
+	packet := buildMCPTTFloorIdle()
 	if got := packet[0] & 0x1f; got != mcpttFloorIdle {
 		t.Fatalf("subtype=%d, want %d", got, mcpttFloorIdle)
 	}
-	if packet[1] != rtcpPacketTypeAPP {
-		t.Fatalf("packet type=%d, want %d", packet[1], rtcpPacketTypeAPP)
-	}
-	if got := binary.BigEndian.Uint16(packet[2:4]); got != 2 {
-		t.Fatalf("rtcp length=%d, want 2", got)
-	}
-	if got := binary.BigEndian.Uint32(packet[4:8]); got != 0x11223344 {
-		t.Fatalf("ssrc=%x, want 11223344", got)
-	}
-	if got := string(packet[8:12]); got != "MCPT" {
-		t.Fatalf("app name=%q, want MCPT", got)
-	}
-}
-
-func TestBuildMCPTTQueuePosition(t *testing.T) {
-	packet := buildMCPTTQueuePosition(0x11223344)
-
-	if len(packet) != 12 {
-		t.Fatalf("len=%d, want 12", len(packet))
-	}
-	if got := packet[0] & 0x1f; got != mcpttQueuePosition {
-		t.Fatalf("subtype=%d, want %d", got, mcpttQueuePosition)
-	}
-	if packet[1] != rtcpPacketTypeAPP {
-		t.Fatalf("packet type=%d, want %d", packet[1], rtcpPacketTypeAPP)
-	}
-	if got := binary.BigEndian.Uint16(packet[2:4]); got != 2 {
-		t.Fatalf("rtcp length=%d, want 2", got)
-	}
-	if got := binary.BigEndian.Uint32(packet[4:8]); got != 0x11223344 {
-		t.Fatalf("ssrc=%x, want 11223344", got)
+	if got := binary.BigEndian.Uint32(packet[4:8]); got != serverFloorSSRC {
+		t.Fatalf("header ssrc=%x, want server", got)
 	}
 	if got := string(packet[8:12]); got != "MCPT" {
 		t.Fatalf("app name=%q, want MCPT", got)
@@ -113,8 +98,7 @@ func TestBuildMCPTTQueuePosition(t *testing.T) {
 }
 
 func TestParseMCPTTFloorEvent(t *testing.T) {
-	packet := buildMCPTTFloorGranted(0x01020304, 30, floorIndicatorNormal)
-	packet[0] = 0x80 | mcpttFloorRequest
+	packet := floorMessage(mcpttFloorRequest, 0x01020304, nil)
 
 	event, ok := parseMCPTTFloorEvent(packet)
 	if !ok {

@@ -162,7 +162,7 @@ func buildMCPTTFloorTaken(ssrc uint32, grantedID string, indicator uint16, grant
 // buildMCPTTFloorReleaseMultiTalker builds a Floor Release Multi Talker
 // message (clause 8.2.14): the identity and SSRC of the participant that
 // released while other talkers keep the floor, with the I-bit set.
-func buildMCPTTFloorReleaseMultiTalker(serverSSRC uint32, userID string, participantSSRC uint32) []byte {
+func buildMCPTTFloorReleaseMultiTalker(userID string, participantSSRC uint32) []byte {
 	var fields []byte
 	fields = appendFloorField(fields, fldUserID, []byte(userID))
 	var ind [2]byte
@@ -173,7 +173,7 @@ func buildMCPTTFloorReleaseMultiTalker(serverSSRC uint32, userID string, partici
 	var ssrcVal [6]byte
 	binary.BigEndian.PutUint32(ssrcVal[:4], participantSSRC)
 	fields = appendFloorField(fields, fldAudioSSRC, ssrcVal[:])
-	return floorMessage(mcpttFloorReleaseMultiTalker, serverSSRC, fields)
+	return floorMessage(mcpttFloorReleaseMultiTalker, serverFloorSSRC, fields)
 }
 
 // groupFloorPolicy resolves the multi-talker configuration for a group URI.

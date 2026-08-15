@@ -109,7 +109,7 @@ func TestBuildFloorTakenSingleTalker(t *testing.T) {
 // Floor Release Multi Talker (clause 8.2.14): subtype 15, the releasing
 // user's ID and SSRC, I-bit set.
 func TestBuildFloorReleaseMultiTalker(t *testing.T) {
-	packet := buildMCPTTFloorReleaseMultiTalker(0x11223344, "sip:bob@example.test", 0x01020304)
+	packet := buildMCPTTFloorReleaseMultiTalker("sip:bob@example.test", 0x01020304)
 	event, ok := parseMCPTTFloorEvent(packet)
 	if !ok || event.Subtype != mcpttFloorReleaseMultiTalker {
 		t.Fatalf("subtype=%d ok=%v, want 15", event.Subtype, ok)

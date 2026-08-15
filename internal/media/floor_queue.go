@@ -127,10 +127,10 @@ func negotiatedQueueing(call store.MCPTTCall) bool {
 
 // buildMCPTTQueuePositionInfo builds a Floor Queue Position Info message
 // (clause 8.2.12) with the Queue Info field: position and priority.
-func buildMCPTTQueuePositionInfo(ssrc uint32, position, priority uint8) []byte {
+func buildMCPTTQueuePositionInfo(position, priority uint8) []byte {
 	var fields []byte
 	fields = appendFloorField(fields, 3 /* Queue Info, table 8.2.3.1-2 */, []byte{position, priority})
-	return floorMessage(mcpttQueuePosition, ssrc, fields)
+	return floorMessage(mcpttQueuePosition, serverFloorSSRC, fields)
 }
 
 // grantQueuedRequest pops the queue for a call's group and grants the floor
@@ -173,7 +173,8 @@ func (o *Observer) grantQueuedRequest(ctx context.Context, pc net.PacketConn, re
 		if err != nil {
 			continue
 		}
-		granted := buildMCPTTFloorGranted(head.ssrc, o.cfg.Media.FloorGrantDurationSeconds, floorIndicatorNormal|floorIndicatorQueueing)
+		granted := buildMCPTTFloorGranted(head.ssrc, o.cfg.Media.FloorGrantDurationSeconds, floorIndicatorNormal|floorIndicatorQueueing, head.priority)
+		o.registerPendingGrant(head.callID, head.ssrc, head.remote, granted)
 		if _, err := pc.WriteTo(granted, dst); err != nil {
 			slog.Warn("MCPTT queued floor grant send failed", "call_id", head.callID, "dst", head.remote, "err", err)
 		} else {

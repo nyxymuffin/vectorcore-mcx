@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
@@ -25,13 +26,15 @@ type Store interface {
 }
 
 type Observer struct {
-	cfg    config.Config
-	st     Store
-	queues *floorQueues
+	cfg           config.Config
+	st            Store
+	queues        *floorQueues
+	pendingMu     sync.Mutex
+	pendingGrants map[string]*pendingGrant
 }
 
 func NewObserver(cfg config.Config, st Store) *Observer {
-	return &Observer{cfg: cfg, st: st, queues: newFloorQueues()}
+	return &Observer{cfg: cfg, st: st, queues: newFloorQueues(), pendingGrants: map[string]*pendingGrant{}}
 }
 
 func (o *Observer) Start(ctx context.Context) error {
@@ -75,6 +78,8 @@ func (o *Observer) listen(ctx context.Context, kind string, port int) error {
 					return
 				case <-t.C:
 					o.sweepSilentTalkers(ctx, pc)
+					o.sweepOverlongTalkers(ctx, pc)
+					o.sweepPendingGrants(ctx, pc)
 				}
 			}
 		}()
@@ -120,6 +125,11 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 		if err := o.st.IncrementCallMedia(ctx, call.CallID, kind, len(packet)); err != nil {
 			slog.Warn("MCPTT media counter update failed", "kind", kind, "call_id", call.CallID, "remote", remoteText, "err", err)
 			return
+		}
+		if ok {
+			// The granted participant is heard from: T20 supervision of a
+			// queued grant ends (clause 6.3.4.3.3).
+			o.clearPendingGrant(call.CallID, header.SSRC)
 		}
 		if stats, ok := rtpStatsFromPacket(packet, call, time.Now().UTC()); ok {
 			if err := o.st.UpdateCallRTPStats(ctx, call.CallID, stats); err != nil {
@@ -170,9 +180,9 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				}
 				var response []byte
 				if multiTalker && remaining > 0 {
-					response = buildMCPTTFloorReleaseMultiTalker(event.SSRC, o.legUser(call), event.SSRC)
+					response = buildMCPTTFloorReleaseMultiTalker(o.legUser(call), event.SSRC)
 				} else {
-					response = buildMCPTTFloorIdle(event.SSRC)
+					response = buildMCPTTFloorIdle()
 				}
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT floor idle send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
@@ -203,7 +213,7 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				if pos > 0 {
 					positionValue = uint8(pos)
 				}
-				response := buildMCPTTQueuePositionInfo(event.SSRC, positionValue, 0)
+				response := buildMCPTTQueuePositionInfo(positionValue, 0)
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT queue position send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
@@ -273,7 +283,7 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 						if pos := o.queues.enqueue(queueKey(call), queuedFloorRequest{
 							callID: call.CallID, ssrc: event.SSRC, remote: remoteText, priority: priority,
 						}); pos > 0 {
-							response := buildMCPTTQueuePositionInfo(event.SSRC, uint8(pos), priority)
+							response := buildMCPTTQueuePositionInfo(uint8(pos), priority)
 							if _, err := pc.WriteTo(response, remote); err != nil {
 								slog.Warn("MCPTT queue position info send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 							} else {
@@ -292,7 +302,11 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 						}
 						// Queue full: fall through to the deny.
 					}
-					response := buildMCPTTFloorDeny(event.SSRC)
+					denyCause := uint16(rejectCauseAnotherHasPermission)
+					if negotiatedQueueing(call) {
+						denyCause = rejectCauseQueueFull
+					}
+					response := buildMCPTTFloorDeny(denyCause)
 					if _, err := pc.WriteTo(response, remote); err != nil {
 						slog.Warn("MCPTT floor deny send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 					} else {
@@ -314,7 +328,11 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				if multiTalker {
 					indicator |= floorIndicatorMultiTalker
 				}
-				response := buildMCPTTFloorGranted(event.SSRC, o.cfg.Media.FloorGrantDurationSeconds, indicator)
+				priority := uint8(0)
+				if event.HasPriority {
+					priority = event.Priority
+				}
+				response := buildMCPTTFloorGranted(event.SSRC, o.cfg.Media.FloorGrantDurationSeconds, indicator, priority)
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT floor grant send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
@@ -757,7 +775,16 @@ func parseMCPTTFloorEvent(packet []byte) (floorEvent, bool) {
 	return event, true
 }
 
-func buildMCPTTFloorGranted(ssrc uint32, durationSeconds int, indicator uint16) []byte {
+// serverFloorSSRC is the floor control server's own RTCP SSRC, carried in
+// the header of every server-originated floor control message (TS 24.380
+// clause 8.1.2: the SSRC of the sending floor control entity).
+const serverFloorSSRC uint32 = 0x4D435054 // "MCPT"
+
+// buildMCPTTFloorGranted builds a Floor Granted message per clause 8.2.5:
+// the header carries the server's SSRC; the granted participant's audio SSRC
+// travels in the Audio SSRC of Granted Participant field (8.2.3.16) and the
+// granted priority in the Floor Priority field (8.2.3.2).
+func buildMCPTTFloorGranted(grantedSSRC uint32, durationSeconds int, indicator uint16, priority uint8) []byte {
 	if durationSeconds < 1 {
 		durationSeconds = 30
 	}
@@ -768,40 +795,48 @@ func buildMCPTTFloorGranted(ssrc uint32, durationSeconds int, indicator uint16) 
 	var dur [2]byte
 	binary.BigEndian.PutUint16(dur[:], uint16(durationSeconds))
 	fields = appendFloorField(fields, fldDuration, dur[:])
+	fields = appendFloorField(fields, fldFloorPriority, []byte{priority, 0})
+	var audio [6]byte
+	binary.BigEndian.PutUint32(audio[:4], grantedSSRC)
+	fields = appendFloorField(fields, fldAudioSSRC, audio[:])
 	var ind [2]byte
 	binary.BigEndian.PutUint16(ind[:], indicator)
 	fields = appendFloorField(fields, fldFloorIndicator, ind[:])
-	return floorMessage(mcpttFloorGranted, ssrc, fields)
+	return floorMessage(mcpttFloorGranted, serverFloorSSRC, fields)
 }
 
-func buildMCPTTFloorDeny(ssrc uint32) []byte {
-	packet := make([]byte, 12)
-	packet[0] = 0x80 | mcpttFloorDeny
-	packet[1] = rtcpPacketTypeAPP
-	binary.BigEndian.PutUint16(packet[2:4], uint16((len(packet)/4)-1))
-	binary.BigEndian.PutUint32(packet[4:8], ssrc)
-	copy(packet[8:12], "MCPT")
-	return packet
+// Floor Deny reject causes, clause 8.2.6.2.
+const (
+	rejectCauseAnotherHasPermission = 1
+	rejectCauseQueueFull            = 7
+)
+
+// Floor Revoke reject causes, clause 8.2.10.2.
+const revokeCauseMediaBurstTooLong = 2
+
+// buildMCPTTFloorDeny builds a Floor Deny per clause 8.2.6: server SSRC in
+// the header and the mandatory Reject Cause field (8.2.3.4).
+func buildMCPTTFloorDeny(cause uint16) []byte {
+	var fields []byte
+	var cv [2]byte
+	binary.BigEndian.PutUint16(cv[:], cause)
+	fields = appendFloorField(fields, fldRejectCause, cv[:])
+	return floorMessage(mcpttFloorDeny, serverFloorSSRC, fields)
 }
 
-func buildMCPTTFloorIdle(ssrc uint32) []byte {
-	packet := make([]byte, 12)
-	packet[0] = 0x80 | mcpttFloorIdle
-	packet[1] = rtcpPacketTypeAPP
-	binary.BigEndian.PutUint16(packet[2:4], uint16((len(packet)/4)-1))
-	binary.BigEndian.PutUint32(packet[4:8], ssrc)
-	copy(packet[8:12], "MCPT")
-	return packet
+// buildMCPTTFloorRevoke builds a Floor Revoke per clause 8.2.10 with the
+// given Reject Cause value.
+func buildMCPTTFloorRevoke(cause uint16) []byte {
+	var fields []byte
+	var cv [2]byte
+	binary.BigEndian.PutUint16(cv[:], cause)
+	fields = appendFloorField(fields, fldRejectCause, cv[:])
+	return floorMessage(mcpttFloorRevoke, serverFloorSSRC, fields)
 }
 
-func buildMCPTTQueuePosition(ssrc uint32) []byte {
-	packet := make([]byte, 12)
-	packet[0] = 0x80 | mcpttQueuePosition
-	packet[1] = rtcpPacketTypeAPP
-	binary.BigEndian.PutUint16(packet[2:4], uint16((len(packet)/4)-1))
-	binary.BigEndian.PutUint32(packet[4:8], ssrc)
-	copy(packet[8:12], "MCPT")
-	return packet
+// buildMCPTTFloorIdle builds a Floor Idle (clause 8.2.8) from the server.
+func buildMCPTTFloorIdle() []byte {
+	return floorMessage(mcpttFloorIdle, serverFloorSSRC, nil)
 }
 
 func packetSample(packet []byte) string {

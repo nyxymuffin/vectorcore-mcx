@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -131,7 +132,19 @@ func TestQueuedFloorRequestGrantedOnRelease(t *testing.T) {
 	o.recordPacket(ctx, pc, "floor", addr(41001), floorMessage(mcpttFloorRelease, 0x0000aaaa, nil))
 	grantSeen := false
 	for _, w := range pc.writes {
-		if ev, ok := parseMCPTTFloorEvent(w.data); ok && ev.Subtype == mcpttFloorGranted && ev.SSRC == 0x0000bbbb {
+		ev, ok := parseMCPTTFloorEvent(w.data)
+		if !ok || ev.Subtype != mcpttFloorGranted {
+			continue
+		}
+		// Clause 8.2.5: server SSRC in the header, the granted participant's
+		// SSRC in the Audio SSRC of Granted Participant field.
+		var grantedSSRC uint32
+		walkFloorFields(w.data[12:], func(id byte, value []byte) {
+			if id == fldAudioSSRC && len(value) >= 4 {
+				grantedSSRC = binary.BigEndian.Uint32(value[:4])
+			}
+		})
+		if ev.SSRC == serverFloorSSRC && grantedSSRC == 0x0000bbbb {
 			grantSeen = true
 			if ev.Indicator&floorIndicatorQueueing == 0 {
 				t.Fatalf("queued grant lacks the queueing indicator: %x", ev.Indicator)
