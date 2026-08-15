@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"strings"
 	"time"
 )
@@ -178,4 +179,27 @@ func (r *KmsResponse) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	return append([]byte(xml.Header), body...), nil
+}
+
+// DecodeUserID decodes the base64 UID of a KmsKeySet's UserID field.
+func DecodeUserID(v string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(v))
+}
+
+// DecodeKeyContent decodes the hexBinary of a KeyContentType element.
+// It refuses an element carrying encrypted key material, because the
+// caller would otherwise treat ciphertext as a key.
+func DecodeKeyContent(k *KeyContent) ([]byte, error) {
+	if k == nil {
+		return nil, errors.New("the key element is absent")
+	}
+	if t := strings.TrimSpace(k.Type); t != "" && t != "KeyContentType" {
+		return nil, errors.New("the key is carried as " + t + ", not as plain hexBinary")
+	}
+	return DecodeHex(k.Value)
+}
+
+// DecodeHex decodes an xsd:hexBinary value, tolerating either case.
+func DecodeHex(v string) ([]byte, error) {
+	return hex.DecodeString(strings.TrimSpace(v))
 }

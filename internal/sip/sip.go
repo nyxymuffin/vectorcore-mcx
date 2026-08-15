@@ -50,6 +50,11 @@ type Server struct {
 
 	// Test hooks for RFC 4028 supervision (per-server, not global - a global
 	// mutated by tests races with the servers of other tests).
+	// keyMgmt is this server's own KMS-provisioned key material and
+	// cskKeys the Client-Server Keys clients have uploaded to it
+	// (TS 33.180 clauses 5.4 and 9.2.1).
+	keyMgmt                     *keyManagement
+	cskKeys                     *cskStore
 	sessionExpiryOverride       time.Duration
 	sessionReapIntervalOverride time.Duration
 	// clientTxSendOverride, when set, replaces the outbound socket write of
@@ -131,9 +136,11 @@ func NewServer(cfg config.Config, st store.Store) *Server {
 		confSubs:        newConferenceSubs(),
 		regroups:        newRegroupState(),
 		sdsCorrelation:  newSDSCorrelator(),
+		cskKeys:         newCSKStore(),
 		udpSem:          make(chan struct{}, maxConcurrentUDPHandlers),
 		tcpSem:          make(chan struct{}, maxConcurrentTCPConns),
 	}
+	s.initKeyManagement()
 	if cfg.SIP.Auth.RequireServiceAuthorization {
 		validator, err := newTokenValidator(cfg.SIP.Auth.TrustedJWKSFile, cfg.SIP.Auth.TrustedIssuer)
 		if err != nil {
@@ -489,6 +496,14 @@ func (s *Server) sendOptions(ctx context.Context) {
 
 func (s *Server) handlePublish(ctx context.Context, send responder, msg *Message) {
 	event := strings.TrimSpace(msg.Header("Event"))
+	// TS 33.180 clause 9.2.1.3 allows the CSK upload to ride on the
+	// PUBLISH that performs MC user authorisation as well as on the
+	// initial REGISTER.
+	if mcpttID := mcpttIdentityFromBody(msg); mcpttID != "" {
+		s.acceptCSKUpload(msg, mcpttID)
+	} else {
+		s.acceptCSKUpload(msg, identityFrom(msg))
+	}
 	if strings.EqualFold(event, "presence") {
 		// Functional alias publications share the presence event package with
 		// affiliation (TS 24.379 clause 9A.2.2.2.3); the <functionalAlias>
@@ -753,6 +768,16 @@ func (s *Server) handleRegister(ctx context.Context, send responder, msg *Messag
 	// request's mcptt-info body (clause 7.3.1A, unprotected case; XML
 	// integrity/confidentiality protection is KMS scope, carried forward)
 	// and bound to the IMS public user identity on success (step 4).
+	// TS 33.180 clause 9.2.1.3: the CSK is uploaded in the client's
+	// initial REGISTER as an application/mikey body part. In the
+	// application server posture the client's own REGISTER travels
+	// inside the third party REGISTER, so both are looked at.
+	s.acceptCSKUpload(msg, publicIdentity)
+	// De-registration ends the security context (clause 9.2.1.2).
+	if !registered {
+		s.cskKeys.forget(publicIdentity)
+	}
+
 	boundMCPTTID := ""
 	if s.cfg.SIP.Mode == "application_server" {
 		boundMCPTTID = s.mcpttIDFromThirdPartyRegister(msg)
