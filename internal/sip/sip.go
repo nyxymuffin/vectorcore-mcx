@@ -2849,12 +2849,27 @@ func (m *Message) Parts() []Part {
 	sections := bytes.Split(m.Body, rawBoundary)
 	var parts []Part
 	for _, section := range sections {
-		section = bytes.TrimSpace(section)
-		if len(section) == 0 || bytes.Equal(section, []byte("--")) || bytes.HasPrefix(section, []byte("--")) {
-			continue
+		// A part body is opaque octets and must not be trimmed. Only the
+		// delimiters around it may be: RFC 2046 clause 5.1.1 puts a CRLF
+		// before each boundary and after it, and marks the close
+		// delimiter with a trailing "--". Trimming whitespace from the
+		// section instead ate the last octet of any body that ended in
+		// one, which for the binary MIKEY messages of TS 33.180 Annex E
+		// is about one upload in forty.
+		if bytes.HasPrefix(section, []byte("--")) {
+			continue // close delimiter and any epilogue
 		}
 		section = bytes.TrimPrefix(section, []byte("\r\n"))
-		section = bytes.TrimSuffix(section, []byte("\r\n"))
+		section = bytes.TrimPrefix(section, []byte("\n"))
+		if len(bytes.TrimSpace(section)) == 0 {
+			continue // the preamble before the first boundary
+		}
+		// Exactly one line break, the one introducing the next boundary.
+		if bytes.HasSuffix(section, []byte("\r\n")) {
+			section = section[:len(section)-2]
+		} else if bytes.HasSuffix(section, []byte("\n")) {
+			section = section[:len(section)-1]
+		}
 		headBody := bytes.SplitN(section, []byte("\r\n\r\n"), 2)
 		if len(headBody) != 2 {
 			headBody = bytes.SplitN(section, []byte("\n\n"), 2)
