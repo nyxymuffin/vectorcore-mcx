@@ -730,16 +730,27 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		// relay lookups have the correct group to work with.
 		groupURI = mcpttID
 	}
-	if ok, status, reason := s.admitGroupInvite(ctx, initiatorURI, groupURI); !ok {
+	// The controlling function of the target group decides admission
+	// (TS 24.379 clause 6.3.3); this participating side only relays the
+	// verdict. Resolution is per group so a remotely homed group later binds
+	// to a SIP implementation of the same seam.
+	controlling := s.controllingFor(groupURI)
+	call := originatingGroupCall{
+		CallID:       callID,
+		InitiatorURI: initiatorURI,
+		GroupURI:     groupURI,
+		SDP:          sdpInfo,
+	}
+	if verdict := controlling.AdmitOriginatingCall(ctx, call); !verdict.Admitted {
 		slog.Warn("MCPTT group INVITE rejected",
 			"call_id", callID,
 			"initiator", initiatorURI,
 			"mcptt_request_uri", mcpttID,
 			"group_uri", groupURI,
-			"status", status,
-			"reason", reason,
+			"status", verdict.Status,
+			"reason", verdict.Reason,
 		)
-		s.respond(send, msg, status, reason, nil, nil)
+		s.respond(send, msg, verdict.Status, verdict.Reason, nil, nil)
 		return
 	}
 	if _, err := s.st.CreateDialog(ctx, store.Dialog{
@@ -841,9 +852,9 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	s.uasInvites.Delete(callID)
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, body)
 
-	// Send group call notifications (RX INVITEs) to all other registered group members.
+	// The controlling function establishes the other participants' legs.
 	if groupURI != "" {
-		go s.sendGroupCallNotifications(context.Background(), callID, groupURI, initiatorURI, sdpInfo)
+		controlling.EstablishGroupLegs(call)
 	}
 }
 
@@ -899,7 +910,7 @@ func (s *Server) handleBYE(ctx context.Context, send responder, msg *Message, so
 	// Tear down AS-initiated RX legs for this group call.
 	call, _ := s.st.GetCall(ctx, callID)
 	if call != nil && call.GroupURI != "" {
-		go s.terminateRXLegs(context.Background(), call.GroupURI, callID)
+		s.controllingFor(call.GroupURI).ReleaseGroupLegs(call.GroupURI, callID)
 	}
 }
 
