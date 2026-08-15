@@ -9,6 +9,7 @@ web/node_modules/
 # Runtime artefacts
 *.db
 *.log
+docs/*
 
 # NOTE: web/dist is deliberately NOT ignored. web/embed.go declares
 # //go:embed all:dist, so the directory must exist for `go build` and
