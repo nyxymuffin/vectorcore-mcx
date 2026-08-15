@@ -113,8 +113,16 @@ func (s *Server) tokenFromAssertion(w http.ResponseWriter, r *http.Request) {
 	clientID := strings.TrimSpace(r.Form.Get("client_id"))
 	scope := r.Form.Get("scope")
 
-	if assertion == "" || clientID == "" {
+	// Table B.7.4-1 makes all four parameters required, and the scope is
+	// what names the partner resource servers the client wants; without
+	// it there is nothing to authorise it for.
+	if assertion == "" || clientID == "" || strings.TrimSpace(scope) == "" {
 		oauthError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	granted := grantedScope(scope)
+	if granted == "" {
+		oauthError(w, http.StatusBadRequest, "invalid_scope")
 		return
 	}
 	if !s.clientRegistered(clientID) {
@@ -145,7 +153,7 @@ func (s *Server) tokenFromAssertion(w http.ResponseWriter, r *http.Request) {
 	// Clause B.9: the access token issued for partner services is an
 	// ordinary access token of clause B.2.2, so it is minted the same way
 	// a locally authorised user's is.
-	s.issueTokens(w, subject, clientID, grantedScope(scope), false)
+	s.issueTokens(w, subject, clientID, granted, false)
 	slog.Info("IdMS partner access token issued", "sub", subject, "primary", issuer)
 }
 

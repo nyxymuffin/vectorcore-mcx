@@ -254,3 +254,34 @@ func TestNoPartnersConfiguredRefusesAssertions(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 }
+
+// Table B.7.4-1 makes the scope required, and it must name at least one
+// MC resource server this domain recognises.
+func TestJWTBearerAssertionRequiresAScope(t *testing.T) {
+	primary, primaryHandler := oidcFixture(t)
+	partner, partnerHandler := partnerFixture(t, primary)
+
+	_, exchanged := postToken(t, primaryHandler, url.Values{
+		"grant_type":         {grantTokenExchange},
+		"resource":           {partner.idmsIssuer()},
+		"subject_token":      {accessToken(t, primary)},
+		"subject_token_type": {tokenTypeJWT},
+	})
+	security, _ := exchanged["access_token"].(string)
+
+	for name, scope := range map[string]string{
+		"absent":       "",
+		"unrecognised": "read write",
+	} {
+		rr, body := postToken(t, partnerHandler, url.Values{
+			"grant_type": {grantJWTBearer}, "assertion": {security},
+			"client_id": {"mcptt_client"}, "scope": {scope},
+		})
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("%s scope: status = %d, want 400", name, rr.Code)
+		}
+		if body["error"] == nil {
+			t.Fatalf("%s scope: no OAuth error in the response", name)
+		}
+	}
+}
