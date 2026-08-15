@@ -217,3 +217,75 @@ func TestPlainMessageAccepted(t *testing.T) {
 		t.Fatalf("responses = %v, want exactly one 200", responses)
 	}
 }
+
+// A disposition notification (signalling without payload) is forwarded to
+// the single listed target per TS 24.282 clause 12.2.3.
+func TestDispositionNotificationForwarded(t *testing.T) {
+	s, st := groupCallFixture(t)
+	ctx := context.Background()
+	if _, err := st.CreateUser(ctx, store.User{
+		IMPU: "sip:orig@example.test", MCPTTID: "sip:orig@example.test", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sock := registerAtSocket(t, st, "sip:orig@example.test")
+
+	info := `<mcdatainfo xmlns="urn:3gpp:ns:mcdataInfo:1.0"><mcdata-Params></mcdata-Params></mcdatainfo>`
+	lists := `<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists"><list><entry uri="sip:orig@example.test"/></list></resource-lists>`
+	body := "--d\r\nContent-Type: application/vnd.3gpp.mcdata-info+xml\r\n\r\n" + info +
+		"\r\n--d\r\nContent-Type: application/vnd.3gpp.mcdata-signalling\r\n\r\nSDS-NOTIFICATION-DELIVERED" +
+		"\r\n--d\r\nContent-Type: application/resource-lists+xml\r\n\r\n" + lists +
+		"\r\n--d--\r\n"
+	raw := "MESSAGE sip:mcdata-as@example.test SIP/2.0\r\n" +
+		"Via: SIP/2.0/UDP 192.0.2.52:5060;branch=z9hG4bKdisp1\r\n" +
+		"From: <sip:caller@example.test>;tag=d1\r\n" +
+		"To: <sip:mcdata-as@example.test>\r\n" +
+		"Call-ID: disp-1\r\n" +
+		"CSeq: 1 MESSAGE\r\n" +
+		`Content-Type: multipart/mixed;boundary="d"` + "\r\n" +
+		"Content-Length: " + fmt.Sprint(len(body)) + "\r\n\r\n" + body
+	responses := collectResponses(t, s, raw)
+	if len(responses) != 1 || !strings.HasPrefix(responses[0], "SIP/2.0 200") {
+		t.Fatalf("responses = %v, want 200", responses)
+	}
+
+	buf := make([]byte, 8192)
+	_ = sock.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := sock.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("disposition never forwarded: %v", err)
+	}
+	fwd := string(buf[:n])
+	for _, want := range []string{
+		"SDS-NOTIFICATION-DELIVERED",
+		"<mcdata-request-uri><mcdataURI>sip:orig@example.test</mcdataURI></mcdata-request-uri>",
+		"P-Asserted-Service: urn:urn-7:3gpp-service.ims.icsi.mcdata.sds",
+	} {
+		if !strings.Contains(fwd, want) {
+			t.Fatalf("forwarded disposition missing %q:\n%s", want, fwd)
+		}
+	}
+}
+
+// Clause 11.1 size limits: an oversized SDS payload is refused with the
+// matching warning (218 one-to-one, 217 group).
+func TestSDSSizeLimits(t *testing.T) {
+	s, st := groupCallFixture(t)
+	s.cfg.SIP.MCData.MaxSDSSizeBytes = 4
+	ctx := context.Background()
+	if _, err := st.CreateUser(ctx, store.User{
+		IMPU: "sip:peer@example.test", MCPTTID: "sip:peer@example.test", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	responses := collectResponses(t, s, sdsMessage("sds-big", "one-to-one-sds", "", []string{"sip:peer@example.test"}))
+	if len(responses) != 1 || !strings.Contains(responses[0], `"218 user not authorised for one-to-one SDS communications due to message size"`) {
+		t.Fatalf("one-to-one oversize: %v", responses)
+	}
+
+	responses = collectResponses(t, s, sdsMessage("sds-big-g", "group-sds", "sip:test_group@example.test", nil))
+	if len(responses) != 1 || !strings.Contains(responses[0], `"217 user not authorised for SDS communications on this group identity due to message size"`) {
+		t.Fatalf("group oversize: %v", responses)
+	}
+}

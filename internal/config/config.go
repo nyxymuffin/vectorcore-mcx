@@ -65,6 +65,19 @@ type SIPConfig struct {
 	MaxAffiliationsN2 int `yaml:"max_affiliations_n2"`
 	// Location configures the TS 24.379 clause 13.2 location procedures.
 	Location LocationConfig `yaml:"location"`
+	// MCData configures the TS 24.282 clause 11.1 transmission limits.
+	MCData MCDataConfig `yaml:"mcdata"`
+}
+
+// MCDataConfig stands in for the size elements of the MCData service
+// configuration document (TS 24.484) consulted by TS 24.282 clause 11.1.
+type MCDataConfig struct {
+	// MaxSDSSizeBytes is <max-data-size-sds-bytes>: the mcdata-payload size
+	// cap for SDS (warnings 217/218). 0 means no limit.
+	MaxSDSSizeBytes int `yaml:"max_sds_size_bytes"`
+	// MaxSingleRequestBytes is the per-request transmission cap of clause
+	// 11.1 steps 7-8 (warning 208). 0 means no limit.
+	MaxSingleRequestBytes int `yaml:"max_single_request_bytes"`
 }
 
 // LocationConfig drives the clause 13.2.2 location reporting configuration

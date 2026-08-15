@@ -73,10 +73,32 @@ func (s *Server) handleMcdataSDS(ctx context.Context, send responder, msg *Messa
 	info := mcdataInfoBody(msg)
 	requestType := strings.ToLower(strings.TrimSpace(xmlElementText(info, "request-type")))
 
+	// A signalling body without a payload is a disposition notification
+	// (TS 24.282 clause 12.2.3), not a standalone SDS.
+	if msg.Part(ctMcdataSignalling) != nil && msg.Part(ctMcdataPayload) == nil {
+		s.handleMcdataDisposition(ctx, send, msg, source)
+		return
+	}
 	// Clause 9.2.2.4.2 step 2: all three MIME bodies must be present.
 	if msg.Part(ctMcdataInfo) == nil || msg.Part(ctMcdataSignalling) == nil || msg.Part(ctMcdataPayload) == nil {
 		s.respond(send, msg, 403, "Forbidden",
 			[]header{s.mcpttWarning("199 expected MIME bodies not in the request")}, nil)
+		return
+	}
+
+	// TS 24.282 clause 11.1 transmission limits on the payload size.
+	payloadSize := len(msg.Part(ctMcdataPayload).Body)
+	if max := s.cfg.SIP.MCData.MaxSingleRequestBytes; max > 0 && payloadSize > max {
+		warning := "208 user not authorised for MCData communications on this group identity due to exceeding the maximum amount of data that can be sent in a single request"
+		s.respond(send, msg, 403, "Forbidden", []header{s.mcpttWarning(warning)}, nil)
+		return
+	}
+	if max := s.cfg.SIP.MCData.MaxSDSSizeBytes; max > 0 && payloadSize > max {
+		warning := "218 user not authorised for one-to-one SDS communications due to message size"
+		if requestType != "one-to-one-sds" {
+			warning = "217 user not authorised for SDS communications on this group identity due to message size"
+		}
+		s.respond(send, msg, 403, "Forbidden", []header{s.mcpttWarning(warning)}, nil)
 		return
 	}
 
@@ -316,4 +338,108 @@ func setXMLURIElement(body, name, value string) string {
 		return body[:at] + element + body[at:]
 	}
 	return body
+}
+
+// handleMcdataDisposition implements TS 24.282 clause 12.2.3: an SDS
+// disposition notification (mcdata-signalling without a payload) is
+// forwarded to the single user listed in the resource-lists body, with the
+// SDS feature tags asserted and <mcdata-request-uri> rewritten (steps 3,
+// 7-14).
+func (s *Server) handleMcdataDisposition(ctx context.Context, send responder, msg *Message, source string) {
+	entries := resourceListEntries(msg)
+	if len(entries) != 1 {
+		// Step 3: exactly one target.
+		s.respond(send, msg, 403, "Forbidden",
+			[]header{s.mcpttWarning("145 unable to determine called party")}, nil)
+		return
+	}
+	target := strings.TrimSpace(entries[0])
+	slog.Info("MCData disposition notification", "target", target,
+		"from", identityFrom(msg), "source", source)
+
+	info := mcdataInfoBody(msg)
+	info = setXMLURIElement(info, "mcdata-request-uri", target)
+	signalling := msg.Part(ctMcdataSignalling)
+
+	regs, err := s.st.ListRegistrations(ctx)
+	if err != nil {
+		s.respond(send, msg, 500, "Server Internal Error", nil, nil)
+		return
+	}
+	targetImpu := s.resolveServedImpu(ctx, target)
+	var reg *store.Registration
+	for _, r := range regs {
+		if r.Registered && strings.EqualFold(strings.TrimSpace(r.PublicIdentity), targetImpu) {
+			candidate := r
+			reg = &candidate
+			break
+		}
+	}
+	if targetImpu == "" || reg == nil {
+		s.respond(send, msg, 404, "Not Found", nil, nil)
+		return
+	}
+
+	const boundary = "mcxasdisp"
+	body := fmt.Sprintf(
+		"--%s\r\nContent-Type: %s\r\n\r\n%s\r\n"+
+			"--%s\r\nContent-Type: %s\r\n\r\n%s\r\n--%s--\r\n",
+		boundary, ctMcdataInfo, info,
+		boundary, ctMcdataSignalling, string(signalling.Body),
+		boundary)
+
+	transport := strings.ToLower(strings.TrimSpace(reg.Transport))
+	if transport == "" {
+		transport = "udp"
+	}
+	targetAddr := ""
+	if reg.SourceIP != "" {
+		port := reg.SourcePort
+		if port == 0 {
+			port = 5060
+		}
+		targetAddr = net.JoinHostPort(reg.SourceIP, strconv.Itoa(port))
+	}
+	if targetAddr == "" {
+		s.respond(send, msg, 404, "Not Found", nil, nil)
+		return
+	}
+	branch := rfc3261BranchCookie + newToken()
+	hdrs := []header{
+		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(transport), advertiseHost(s.cfg), branch)},
+		{"Max-Forwards", "70"},
+		{"From", fmt.Sprintf("<%s>;tag=%s", s.cfg.MCX.SIPIdentity, newToken())},
+		{"To", fmt.Sprintf("<%s>", targetImpu)},
+		{"Call-ID", newToken()},
+		{"CSeq", "1 MESSAGE"},
+		{"Accept-Contact", "*;+g.3gpp.mcdata.sds;require;explicit"},
+		{"Accept-Contact", `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mcdata.sds";require;explicit`},
+		{"P-Asserted-Identity", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
+		{"P-Asserted-Service", "urn:urn-7:3gpp-service.ims.icsi.mcdata.sds"},
+		{"Content-Type", fmt.Sprintf(`multipart/mixed;boundary="%s"`, boundary)},
+	}
+	out := buildRequest("MESSAGE", targetImpu, hdrs, []byte(body))
+	s.sendTransacted(ctx, transport, targetAddr, branch, "MESSAGE", []byte(out))
+	s.respond(send, msg, 200, "OK", nil, nil)
+}
+
+// resolveServedImpu maps an MCData/MCPTT ID to the served user's IMPU.
+func (s *Server) resolveServedImpu(ctx context.Context, id string) string {
+	users, err := s.st.ListUsers(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, user := range users {
+		if !user.Enabled {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(user.MCPTTID), id) ||
+			strings.EqualFold(strings.TrimSpace(user.IMPU), id) {
+			if impu := strings.TrimSpace(user.IMPU); impu != "" {
+				return impu
+			}
+			return strings.TrimSpace(user.MCPTTID)
+		}
+	}
+	return ""
 }
