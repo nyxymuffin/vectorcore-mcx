@@ -119,7 +119,7 @@ func (s *Server) handleXCAP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "authorization required", http.StatusForbidden)
 			return
 		}
-		setXCAPIdentity(r, identity)
+		r = withXCAPIdentity(r, identity)
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -246,14 +246,32 @@ func writeXCAPError(w http.ResponseWriter, status int, body string) {
 }
 
 func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
-	// Documents under the generated application usages are derived live from
-	// provisioning state; storing a client's copy would either shadow the
-	// generated content or silently diverge from what GET returns. RFC 4825
-	// clause 8.2.2 allows the server to refuse with a constraint failure.
+	// Group documents and user profiles accept authorised client writes
+	// (TS 24.481 clause 6 / TS 24.484 clause 6.3.13), applied into the store
+	// so GET keeps serving the regenerated canonical form. The remaining
+	// generated usages (UE configs, service config) are server-owned
+	// configuration and stay read-only per RFC 4825 clause 8.2.2 constraint
+	// failure.
 	if isGeneratedDocumentAUID(auidFromPath(path)) {
+		if docPath, node := splitNodeSelector(path); node != "" {
+			_ = docPath
+			setXCAPResult(r, "node_write_unsupported")
+			writeXCAPError(w, http.StatusConflict,
+				xcapErrorBody("cannot-insert", "partial document modification is not supported"))
+			return
+		}
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			setXCAPResult(r, "read_error")
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if s.handleGeneratedPut(w, r, path, string(bodyBytes)) {
+			return
+		}
 		setXCAPResult(r, "generated_readonly")
 		writeXCAPError(w, http.StatusConflict,
-			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify users/groups via the management API"))
+			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify it via the management API"))
 		return
 	}
 	if docPath, node := splitNodeSelector(path); node != "" {
@@ -327,9 +345,12 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
 
 func (s *Server) delete(w http.ResponseWriter, r *http.Request, path string) {
 	if isGeneratedDocumentAUID(auidFromPath(path)) {
+		if s.deleteGroupDocument(w, r, path) {
+			return
+		}
 		setXCAPResult(r, "generated_readonly")
 		writeXCAPError(w, http.StatusConflict,
-			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify users/groups via the management API"))
+			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify it via the management API"))
 		return
 	}
 	doc, err := s.st.GetCMSDocumentByPath(r.Context(), path)
@@ -1229,27 +1250,21 @@ func logRequests(next http.Handler) http.Handler {
 type xcapRequestInfoKey struct{}
 
 type xcapRequestInfo struct {
-	result   string
-	identity string
+	result string
 }
 
-// setXCAPIdentity records the authenticated MC service ID of the request
+type xcapIdentityKey struct{}
+
+// withXCAPIdentity records the authenticated MC service ID of the request
 // (TS 24.482: the identity derived from the bearer token).
-func setXCAPIdentity(r *http.Request, identity string) {
-	info, ok := r.Context().Value(xcapRequestInfoKey{}).(*xcapRequestInfo)
-	if !ok || info == nil {
-		return
-	}
-	info.identity = identity
+func withXCAPIdentity(r *http.Request, identity string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), xcapIdentityKey{}, identity))
 }
 
 // xcapIdentity returns the authenticated MC service ID, or "".
 func xcapIdentity(r *http.Request) string {
-	info, ok := r.Context().Value(xcapRequestInfoKey{}).(*xcapRequestInfo)
-	if !ok || info == nil {
-		return ""
-	}
-	return info.identity
+	v, _ := r.Context().Value(xcapIdentityKey{}).(string)
+	return v
 }
 
 func setXCAPResult(r *http.Request, result string) {

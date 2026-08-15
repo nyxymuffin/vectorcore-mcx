@@ -154,11 +154,12 @@ func TestUnknownAUIDIs404(t *testing.T) {
 	}
 }
 
-// PUT of a generated document is refused with an xcap-error constraint
-// failure instead of storing a shadow copy.
+// PUT of a server-owned generated document (service config, UE configs) is
+// refused with an xcap-error constraint failure instead of storing a shadow
+// copy. Group documents and user profiles accept writes (see xcap_write_test).
 func TestPutGeneratedDocumentRefused(t *testing.T) {
 	s, st := xcapFixture(t)
-	rr := doXCAP(s, http.MethodPut, "/xcap-root/org.3gpp.mcptt.user-profile/users/sip:x@example.test/profile.xml", "", "", "<mcptt-user-profile/>")
+	rr := doXCAP(s, http.MethodPut, "/xcap-root/org.3gpp.mcptt.service-config/global/service-config.xml", "", "", "<service-configuration-info/>")
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", rr.Code)
 	}
