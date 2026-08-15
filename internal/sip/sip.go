@@ -38,6 +38,8 @@ type Server struct {
 	chatSessions       sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
 	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
 	emergencyAlerts    *alertState
+	confSubs           *conferenceSubs
+	confVersion        atomic.Int64
 	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
 
 	// Test hooks for RFC 4028 supervision (per-server, not global - a global
@@ -120,6 +122,7 @@ func NewServer(cfg config.Config, st store.Store) *Server {
 		st:              st,
 		learned:         map[string]learnedRoute{},
 		emergencyAlerts: newAlertState(),
+		confSubs:        newConferenceSubs(),
 		udpSem:          make(chan struct{}, maxConcurrentUDPHandlers),
 		tcpSem:          make(chan struct{}, maxConcurrentTCPConns),
 	}
@@ -812,7 +815,7 @@ func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Messa
 	// corruption the audit flagged. RFC 6665 wants 489 with the supported
 	// packages listed in Allow-Events.
 	switch strings.ToLower(event) {
-	case "presence", "xcap-diff", "affiliation":
+	case "presence", "xcap-diff", "affiliation", "conference":
 	default:
 		s.respond(send, msg, 489, "Bad Event",
 			[]header{{"Allow-Events", "presence, xcap-diff"}}, nil)
@@ -839,9 +842,24 @@ func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Messa
 	if reqExpires > 3600 {
 		reqExpires = 3600
 	}
+	// Conference event package (TS 24.379 clause 10.1.3.4.1): the
+	// subscriber must be a current participant of the group session named in
+	// the mcptt-info body.
+	confGroupURI := ""
+	if strings.EqualFold(event, "conference") {
+		confGroupURI = conferenceGroupURI(msg)
+		if confGroupURI == "" || !s.isSessionParticipant(ctx, confGroupURI, subscriberURI) {
+			slog.Warn("conference subscription refused", "subscriber", subscriberURI, "group_uri", confGroupURI)
+			s.respond(send, msg, 403, "Forbidden", nil, nil)
+			return
+		}
+		selectors = []string{confGroupURI}
+	}
 	if reqExpires == 0 {
-		// Unsubscribe: drop the change-NOTIFY registration (RFC 5875).
+		// Unsubscribe: drop the change-NOTIFY registrations (RFC 5875 /
+		// conference).
 		s.xcapSubs.Delete(msg.Header("Call-ID"))
+		s.registerConferenceSubscription(store.Subscription{CallID: msg.Header("Call-ID")}, "", 0)
 		s.respondTagged(send, msg, 200, "OK", localTag, []header{{"Expires", "0"}}, nil)
 		return
 	}
@@ -868,9 +886,12 @@ func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Messa
 		return
 	}
 	sub.Selectors = selectors
-	// Change-triggered NOTIFY registry (RFC 5875): the subscription is
-	// tracked until it unsubscribes or the server restarts.
+	// Change-triggered NOTIFY registries: the subscription is tracked until
+	// it unsubscribes or the server restarts.
 	s.registerXCAPSubscription(sub, reqExpires)
+	if strings.EqualFold(event, "conference") {
+		s.registerConferenceSubscription(sub, confGroupURI, reqExpires)
+	}
 	// Cache subscription route for RX INVITE delivery: the mo@pcscf Route entry
 	// (with the UE's SIP outbound ftag) lets P-CSCF deliver the INVITE over the
 	// UE's existing outbound TCP connection instead of opening a new TCP SYN.
@@ -1176,6 +1197,7 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	}
 	// RFC 4028 supervision starts with the answer (clause 6.3.3.2.3.2 item 6).
 	s.markSessionAnswered(ctx, callID)
+	s.NotifyConferenceChange(groupURI)
 	// Final response committed — CANCEL can no longer trigger a 487.
 	s.uasInvites.Delete(callID)
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, body)
@@ -1242,6 +1264,8 @@ func (s *Server) handleBYE(ctx context.Context, send responder, msg *Message, so
 		if peers, err := s.st.ListCallsByGroup(ctx, call.GroupURI); err == nil && len(peers) == 0 {
 			s.setGroupPriorityState(call.GroupURI, "")
 		}
+		// The participant set shrank (clause 10.1.3.4.2).
+		s.NotifyConferenceChange(call.GroupURI)
 	}
 }
 
@@ -1819,6 +1843,7 @@ func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegC
 	}
 	s.markSessionAnswered(ctx, callID)
 	established = true
+	s.NotifyConferenceChange(groupURI)
 	slog.Info("RX INVITE established", "call_id", callID, "member", memberImpu,
 		"audio_remote", fmt.Sprintf("%s:%d", rxSDP.Audio.ConnectionIP, rxSDP.Audio.Port),
 		"group_uri", groupURI, "tx_call_id", txCallID)
@@ -2023,6 +2048,13 @@ func notifyRequestURI(sub store.Subscription, routes []string, realm string) str
 }
 
 func (s *Server) notifyBody(ctx context.Context, sub store.Subscription) ([]byte, string) {
+	if strings.EqualFold(sub.Event, "conference") {
+		groupURI := ""
+		if len(sub.Selectors) > 0 {
+			groupURI = sub.Selectors[0]
+		}
+		return s.conferenceNotifyBody(ctx, sub, groupURI, int(s.confVersion.Add(1)))
+	}
 	if strings.EqualFold(sub.Event, "xcap-diff") {
 		body := s.xcapDiffBody(ctx, sub.SubscriberURI, sub.Selectors)
 		slog.Debug("SIP xcap-diff NOTIFY body generated", "call_id", sub.CallID, "subscriber", sub.SubscriberURI, "body", body)

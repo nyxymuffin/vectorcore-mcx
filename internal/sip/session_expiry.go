@@ -152,6 +152,7 @@ func (s *Server) releaseExpiredCall(ctx context.Context, call store.MCPTTCall) {
 		if peers, err := s.st.ListCallsByGroup(ctx, call.GroupURI); err == nil && len(peers) == 0 {
 			s.setGroupPriorityState(call.GroupURI, "")
 		}
+		s.NotifyConferenceChange(call.GroupURI)
 	}
 }
 

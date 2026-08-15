@@ -196,7 +196,9 @@ func TestAffiliationPublishStillWorks(t *testing.T) {
 func TestSubscribeUnknownEventGets489(t *testing.T) {
 	s, _ := faFixture(t)
 
-	for _, event := range []string{"Event: conference\r\n", ""} {
+	// "conference" is a served package since TS 24.379 clause 10.1.3 landed;
+	// "dialog" stands in as the unknown example.
+	for _, event := range []string{"Event: dialog\r\n", ""} {
 		raw := "SUBSCRIBE sip:mcptt-as@example.test SIP/2.0\r\n" +
 			"Via: SIP/2.0/UDP 192.0.2.52:5060;branch=z9hG4bKsub" + fmt.Sprint(len(event)) + "\r\n" +
 			"From: <sip:driver@example.test>;tag=s1\r\n" +
