@@ -67,6 +67,17 @@ type SIPConfig struct {
 	Location LocationConfig `yaml:"location"`
 	// MCData configures the TS 24.282 clause 11.1 transmission limits.
 	MCData MCDataConfig `yaml:"mcdata"`
+	// PreEstablished configures pre-established sessions (TS 24.379 clause 8).
+	PreEstablished PreEstablishedConfig `yaml:"preestablished"`
+}
+
+// PreEstablishedConfig drives TS 24.379 clause 8 pre-established sessions.
+type PreEstablishedConfig struct {
+	// Enabled default true; false refuses establishment INVITEs.
+	Enabled bool `yaml:"enabled"`
+	// PSI is the public service identity clients INVITE to establish a
+	// session; empty means sip:mcptt-pes@<realm>.
+	PSI string `yaml:"psi"`
 }
 
 // MCDataConfig stands in for the size elements of the MCData service
@@ -338,6 +349,7 @@ func Default() Config {
 	cfg := Config{}
 	cfg.SIP.RecordRoute = true
 	cfg.SIP.Adhoc.Enabled = true
+	cfg.SIP.PreEstablished.Enabled = true
 	// TNG2 default (TS 24.379 clause 6.3.3.1.16); explicit 0 disables.
 	cfg.SIP.Emergency.GroupTimeLimitSeconds = 300
 	cfg.Media.Enabled = true

@@ -39,6 +39,7 @@ type Server struct {
 	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
 	emergencyAlerts    *alertState
 	confSubs           *conferenceSubs
+	pesSessions        sync.Map // callID → *pesSession, established pre-established sessions (TS 24.379 §8)
 	remoteInvites      sync.Map // original callID → *remoteInviteState, in-flight relayed INVITEs (CANCEL relay)
 	locationRequests   sync.Map // lower(target IMPU) → requester IMPU, pending on-demand location fetches (TS 24.379 §13.2.3.2)
 	confVersion        atomic.Int64
@@ -426,6 +427,8 @@ func (s *Server) handleRaw(ctx context.Context, source, transport string, raw []
 		s.handleCANCEL(ctx, send, msg, source, transport)
 	case "UPDATE", "INFO":
 		s.handleInDialogRequest(ctx, send, msg, source, transport)
+	case "REFER":
+		s.handleRefer(ctx, send, msg, source, transport)
 	case "MESSAGE":
 		s.handleMessage(ctx, send, msg, source, transport)
 	default:
@@ -956,6 +959,12 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// <session-type>adhoc</session-type> is an ad hoc group call; its
 	// membership comes from the request, not from group documents, so it takes
 	// its own controlling path (clause 17.4.2.2).
+	// A pre-established session establishment INVITE targets its own PSI
+	// (TS 24.379 clause 8.2.2) and takes none of the call paths.
+	if s.isPreEstablishedInvite(msg) {
+		s.handlePreEstablishedInvite(ctx, send, msg, source, transport)
+		return
+	}
 	switch sessionTypeFromBody(msg) {
 	case "adhoc":
 		s.handleAdhocInvite(ctx, send, msg, source, transport)
@@ -1274,6 +1283,9 @@ func (s *Server) handleBYE(ctx context.Context, send responder, msg *Message, so
 		}
 		// The participant set shrank (clause 10.1.3.4.2).
 		s.NotifyConferenceChange(call.GroupURI)
+	}
+	if call != nil {
+		s.releasePreEstablished(callID)
 	}
 }
 
