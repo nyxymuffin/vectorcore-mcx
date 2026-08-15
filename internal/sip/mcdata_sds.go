@@ -52,6 +52,12 @@ func (s *Server) handleMessage(ctx context.Context, send responder, msg *Message
 		s.handleMcdataSDS(ctx, send, msg, source, transport)
 		return
 	}
+	// An mcptt-info body carrying <alert-ind> is an emergency alert MESSAGE
+	// (TS 24.379 clause 12.1.3).
+	if info := mcpttInfoOf(msg); info != "" && strings.Contains(info, "<alert-ind>") {
+		s.handleMcpttAlertMessage(ctx, send, msg, source)
+		return
+	}
 	slog.Info("SIP MESSAGE received (non-MCData)", "call_id", msg.Header("Call-ID"), "source", source)
 	s.respond(send, msg, 200, "OK", nil, nil)
 }

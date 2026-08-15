@@ -37,6 +37,7 @@ type Server struct {
 	notifyCSeq         sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
 	chatSessions       sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
 	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
+	emergencyAlerts    *alertState
 	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
 
 	// Test hooks for RFC 4028 supervision (per-server, not global - a global
@@ -115,11 +116,12 @@ type uasInviteState struct {
 
 func NewServer(cfg config.Config, st store.Store) *Server {
 	s := &Server{
-		cfg:     cfg,
-		st:      st,
-		learned: map[string]learnedRoute{},
-		udpSem:  make(chan struct{}, maxConcurrentUDPHandlers),
-		tcpSem:  make(chan struct{}, maxConcurrentTCPConns),
+		cfg:             cfg,
+		st:              st,
+		learned:         map[string]learnedRoute{},
+		emergencyAlerts: newAlertState(),
+		udpSem:          make(chan struct{}, maxConcurrentUDPHandlers),
+		tcpSem:          make(chan struct{}, maxConcurrentTCPConns),
 	}
 	if cfg.SIP.Auth.RequireServiceAuthorization {
 		validator, err := newTokenValidator(cfg.SIP.Auth.TrustedJWKSFile, cfg.SIP.Auth.TrustedIssuer)
