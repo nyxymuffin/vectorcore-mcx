@@ -20,9 +20,23 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	st     store.Store
-	tokens *mctoken.Validator
+	cfg      config.Config
+	st       store.Store
+	tokens   *mctoken.Validator
+	onChange func(paths ...string)
+}
+
+// SetOnDocumentChange installs the callback invoked after a successful
+// document write or delete, carrying the changed document paths. The SIP
+// server uses it for change-triggered xcap-diff NOTIFY (RFC 5875).
+func (s *Server) SetOnDocumentChange(fn func(paths ...string)) {
+	s.onChange = fn
+}
+
+func (s *Server) documentChanged(paths ...string) {
+	if s.onChange != nil {
+		s.onChange(paths...)
+	}
 }
 
 func NewServer(cfg config.Config, st store.Store) *Server {

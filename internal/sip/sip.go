@@ -36,6 +36,7 @@ type Server struct {
 	uasInvites         sync.Map // callID → *uasInviteState, UAS INVITE pending final response (for CANCEL §9.2)
 	notifyCSeq         sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
 	chatSessions       sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
+	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
 	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
 
 	// Test hooks for RFC 4028 supervision (per-server, not global - a global
@@ -672,6 +673,12 @@ func (s *Server) handleRegister(ctx context.Context, send responder, msg *Messag
 
 func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Message, source, transport string) {
 	event := strings.TrimSpace(msg.Header("Event"))
+	// RFC 6665: the event type is the token before any event parameters -
+	// TS 24.481 clause A.3 subscribes with
+	// "Event: xcap-diff; diff-processing=no-patching".
+	if i := strings.IndexByte(event, ';'); i >= 0 {
+		event = strings.TrimSpace(event[:i])
+	}
 	// Only known event packages are served. Defaulting the absent or unknown
 	// case to affiliation answered subscriptions to other packages (functional
 	// alias determination, conference) with affiliation data - a silent
@@ -706,6 +713,8 @@ func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Messa
 		reqExpires = 3600
 	}
 	if reqExpires == 0 {
+		// Unsubscribe: drop the change-NOTIFY registration (RFC 5875).
+		s.xcapSubs.Delete(msg.Header("Call-ID"))
 		s.respondTagged(send, msg, 200, "OK", localTag, []header{{"Expires", "0"}}, nil)
 		return
 	}
@@ -732,6 +741,9 @@ func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Messa
 		return
 	}
 	sub.Selectors = selectors
+	// Change-triggered NOTIFY registry (RFC 5875): the subscription is
+	// tracked until it unsubscribes or the server restarts.
+	s.registerXCAPSubscription(sub, reqExpires)
 	// Cache subscription route for RX INVITE delivery: the mo@pcscf Route entry
 	// (with the UE's SIP outbound ftag) lets P-CSCF deliver the INVITE over the
 	// UE's existing outbound TCP connection instead of opening a new TCP SYN.

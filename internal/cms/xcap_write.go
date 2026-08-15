@@ -181,6 +181,7 @@ func (s *Server) putGroupDocument(w http.ResponseWriter, r *http.Request, path, 
 
 	slog.Info("GMS group document written", "group_uri", groupURI, "created", created,
 		"members", len(members), "by", xcapIdentity(r))
+	s.documentChanged(path)
 	regenerated := s.defaultGMSGroup(ctx, path)
 	w.Header().Set("ETag", ContentETag(regenerated))
 	if created {
@@ -220,6 +221,7 @@ func (s *Server) deleteGroupDocument(w http.ResponseWriter, r *http.Request, pat
 			return true
 		}
 		slog.Info("GMS group document deleted", "group_uri", groupURI, "by", xcapIdentity(r))
+		s.documentChanged(path)
 		setXCAPResult(r, "deleted")
 		w.WriteHeader(http.StatusNoContent)
 		return true
@@ -278,6 +280,7 @@ func (s *Server) putUserProfile(w http.ResponseWriter, r *http.Request, path, bo
 		return
 	}
 	slog.Info("user profile document written", "user", user.MCPTTID, "by", xcapIdentity(r))
+	s.documentChanged(path)
 	regenerated := s.defaultUserProfile(ctx, path)
 	w.Header().Set("ETag", ContentETag(regenerated))
 	setXCAPResult(r, "updated")

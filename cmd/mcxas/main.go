@@ -66,7 +66,11 @@ func main() {
 	errCh := make(chan error, 8)
 	sipSrv := sipserver.NewServer(cfg, st)
 	go func() { errCh <- api.New(st, cfg, version).Start(ctx, cfg.API.Listen) }()
-	go func() { errCh <- cms.NewServer(cfg, st).Start(ctx) }()
+	cmsSrv := cms.NewServer(cfg, st)
+	// Change-triggered xcap-diff NOTIFY (RFC 5875): document writes on the
+	// CMS/GMS push to SIP subscribers.
+	cmsSrv.SetOnDocumentChange(sipSrv.NotifyXCAPChange)
+	go func() { errCh <- cmsSrv.Start(ctx) }()
 	go func() { errCh <- media.NewObserver(cfg, st).Start(ctx) }()
 	go func() { errCh <- sipSrv.ListenUDP(ctx) }()
 	go func() { errCh <- sipSrv.ListenTCP(ctx) }()
