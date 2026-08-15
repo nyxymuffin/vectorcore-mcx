@@ -64,18 +64,74 @@ func (s *Server) reapExpiredSessions(ctx context.Context) {
 		slog.Warn("session reaper list failed", "err", err)
 		return
 	}
+	groups, err := s.st.ListGroups(ctx)
+	if err != nil {
+		groups = nil
+	}
 	now := time.Now().UTC()
 	for _, call := range calls {
 		if call.State == "terminated" || call.State == "cancelled" {
 			continue
 		}
-		if call.SessionExpiresAt.IsZero() || now.Before(call.SessionExpiresAt) {
+		if !call.SessionExpiresAt.IsZero() && !now.Before(call.SessionExpiresAt) {
+			slog.Info("MCPTT session expired without refresh (RFC 4028)",
+				"call_id", call.CallID, "state", call.State, "expired_at", call.SessionExpiresAt)
+			s.releaseExpiredCall(ctx, call)
 			continue
 		}
-		slog.Info("MCPTT session expired without refresh (RFC 4028)",
-			"call_id", call.CallID, "state", call.State, "expired_at", call.SessionExpiresAt)
-		s.releaseExpiredCall(ctx, call)
+		if deadline, reason := s.maxDurationDeadline(call, groups); !deadline.IsZero() && !now.Before(deadline) {
+			slog.Info("MCPTT call exceeded its maximum duration",
+				"call_id", call.CallID, "reason", reason, "deadline", deadline)
+			s.releaseExpiredCall(ctx, call)
+		}
 	}
+}
+
+// maxDurationDeadline computes the call-duration limit:
+//   - TNG3 for group calls, from the group document's
+//     <on-network-maximum-duration> (TS 24.379 clause 6.3.3.5.1); suppressed
+//     while the group's in-progress emergency state holds (clause 6.3.3.5.2,
+//     TNG2 territory).
+//   - the ad hoc group call timer from sip.adhoc.max_call_duration_seconds
+//     (clause 17.4.2.2 step 13).
+//   - the private call timer from sip.private_call.max_duration_seconds
+//     (clause 11.1.1.4.1 step 10).
+//
+// A zero deadline means no limit applies.
+func (s *Server) maxDurationDeadline(call store.MCPTTCall, groups []store.Group) (time.Time, string) {
+	start := call.AnsweredAt
+	if start.IsZero() {
+		start = call.EstablishedAt
+	}
+	if start.IsZero() {
+		return time.Time{}, ""
+	}
+	groupURI := strings.TrimSpace(call.GroupURI)
+	switch {
+	case strings.HasPrefix(groupURI, "sip:mcptt-session-"):
+		if d := s.cfg.SIP.PrivateCall.MaxDurationSeconds; d > 0 {
+			return start.Add(time.Duration(d) * time.Second), "private call timer"
+		}
+	case strings.HasPrefix(groupURI, "sip:mcptt-adhoc-"):
+		if d := s.cfg.SIP.Adhoc.MaxCallDurationSeconds; d > 0 {
+			return start.Add(time.Duration(d) * time.Second), "adhoc group call timer"
+		}
+	default:
+		for _, g := range groups {
+			if !g.Enabled || g.MaxDurationSeconds <= 0 {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(g.URI), groupURI) {
+				continue
+			}
+			if s.groupPriorityState(groupURI) == "emergency" {
+				// TNG2 replaces TNG3 while the emergency is in progress.
+				return time.Time{}, ""
+			}
+			return start.Add(time.Duration(g.MaxDurationSeconds) * time.Second), "TNG3 group call timer"
+		}
+	}
+	return time.Time{}, ""
 }
 
 // releaseExpiredCall sends the RFC 4028 clause 10 BYE for one leg and cleans

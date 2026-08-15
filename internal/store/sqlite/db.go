@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS groups (
 	max_simultaneous_talkers INTEGER NOT NULL DEFAULT 0,
 	chat_group INTEGER NOT NULL DEFAULT 0,
 	allow_emergency_call INTEGER NOT NULL DEFAULT 0,
+	max_duration_seconds INTEGER NOT NULL DEFAULT 0,
 	is_default INTEGER NOT NULL DEFAULT 0, -- legacy/unused, kept to avoid a column-drop migration
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
@@ -351,6 +352,7 @@ FROM affiliations;
 		`ALTER TABLE groups ADD COLUMN allow_emergency_call INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN allow_emergency_call INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE mcptt_calls ADD COLUMN session_expires_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE groups ADD COLUMN max_duration_seconds INTEGER NOT NULL DEFAULT 0`,
 		`UPDATE group_memberships SET role = 'MCPTT User' WHERE LOWER(TRIM(role)) IN ('', 'member', 'user')`,
 		`UPDATE group_memberships SET role = 'MCPTT Administrator' WHERE LOWER(TRIM(role)) IN ('admin', 'administrator')`,
 		`UPDATE group_memberships SET role = 'MCPTT Dispatcher' WHERE LOWER(TRIM(role)) = 'dispatcher'`,
@@ -706,7 +708,7 @@ func (s *Store) DeleteUser(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListGroups(ctx context.Context) ([]store.Group, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, uri, display_name, description, enabled, multi_talker, max_simultaneous_talkers, chat_group, allow_emergency_call, created_at, updated_at FROM groups ORDER BY display_name, uri`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, uri, display_name, description, enabled, multi_talker, max_simultaneous_talkers, chat_group, allow_emergency_call, max_duration_seconds, created_at, updated_at FROM groups ORDER BY display_name, uri`)
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +718,7 @@ func (s *Store) ListGroups(ctx context.Context) ([]store.Group, error) {
 		var v store.Group
 		var enabled, multiTalker, chatGroup, allowEmergency int
 		var created, updated string
-		if err := rows.Scan(&v.ID, &v.URI, &v.DisplayName, &v.Description, &enabled, &multiTalker, &v.MaxSimultaneousTalkers, &chatGroup, &allowEmergency, &created, &updated); err != nil {
+		if err := rows.Scan(&v.ID, &v.URI, &v.DisplayName, &v.Description, &enabled, &multiTalker, &v.MaxSimultaneousTalkers, &chatGroup, &allowEmergency, &v.MaxDurationSeconds, &created, &updated); err != nil {
 			return nil, err
 		}
 		v.Enabled = scanBool(enabled)
@@ -734,8 +736,8 @@ func (s *Store) GetGroup(ctx context.Context, id string) (*store.Group, error) {
 	var v store.Group
 	var enabled, multiTalker, chatGroup, allowEmergency int
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, uri, display_name, description, enabled, multi_talker, max_simultaneous_talkers, chat_group, allow_emergency_call, created_at, updated_at FROM groups WHERE id = ?`), id).
-		Scan(&v.ID, &v.URI, &v.DisplayName, &v.Description, &enabled, &multiTalker, &v.MaxSimultaneousTalkers, &chatGroup, &allowEmergency, &created, &updated)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, uri, display_name, description, enabled, multi_talker, max_simultaneous_talkers, chat_group, allow_emergency_call, max_duration_seconds, created_at, updated_at FROM groups WHERE id = ?`), id).
+		Scan(&v.ID, &v.URI, &v.DisplayName, &v.Description, &enabled, &multiTalker, &v.MaxSimultaneousTalkers, &chatGroup, &allowEmergency, &v.MaxDurationSeconds, &created, &updated)
 	if ok, err := notFound(err); ok || err != nil {
 		return nil, err
 	}
@@ -750,8 +752,8 @@ func (s *Store) GetGroup(ctx context.Context, id string) (*store.Group, error) {
 
 func (s *Store) CreateGroup(ctx context.Context, v store.Group) (store.Group, error) {
 	v.ID, v.CreatedAt, v.UpdatedAt = stampNew(v.ID)
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO groups (id, uri, display_name, description, enabled, multi_talker, max_simultaneous_talkers, chat_group, allow_emergency_call, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), boolInt(v.MultiTalker), v.MaxSimultaneousTalkers, boolInt(v.ChatGroup), boolInt(v.AllowEmergencyCall), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO groups (id, uri, display_name, description, enabled, multi_talker, max_simultaneous_talkers, chat_group, allow_emergency_call, max_duration_seconds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		v.ID, v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), boolInt(v.MultiTalker), v.MaxSimultaneousTalkers, boolInt(v.ChatGroup), boolInt(v.AllowEmergencyCall), v.MaxDurationSeconds, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -763,8 +765,8 @@ func (s *Store) UpdateGroup(ctx context.Context, id string, v store.Group) (*sto
 	v.ID = id
 	v.CreatedAt = current.CreatedAt
 	v.UpdatedAt = time.Now().UTC()
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE groups SET uri=?, display_name=?, description=?, enabled=?, multi_talker=?, max_simultaneous_talkers=?, chat_group=?, allow_emergency_call=?, updated_at=? WHERE id=?`),
-		v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), boolInt(v.MultiTalker), v.MaxSimultaneousTalkers, boolInt(v.ChatGroup), boolInt(v.AllowEmergencyCall), formatTime(v.UpdatedAt), id)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE groups SET uri=?, display_name=?, description=?, enabled=?, multi_talker=?, max_simultaneous_talkers=?, chat_group=?, allow_emergency_call=?, max_duration_seconds=?, updated_at=? WHERE id=?`),
+		v.URI, v.DisplayName, v.Description, boolInt(v.Enabled), boolInt(v.MultiTalker), v.MaxSimultaneousTalkers, boolInt(v.ChatGroup), boolInt(v.AllowEmergencyCall), v.MaxDurationSeconds, formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 

@@ -720,6 +720,12 @@ func (s *Server) defaultGMSGroup(ctx context.Context, path string) string {
 		multiTalker += `
     <mcpttgi:allow-MCPTT-emergency-call>true</mcpttgi:allow-MCPTT-emergency-call>`
 	}
+	// TS 24.481 clause 7.2.4.2 <on-network-maximum-duration> (xs:duration):
+	// the TNG3 group call timer value (TS 24.379 clause 6.3.3.5).
+	if group.MaxDurationSeconds > 0 {
+		multiTalker += fmt.Sprintf(`
+    <mcpttgi:on-network-maximum-duration>PT%dS</mcpttgi:on-network-maximum-duration>`, group.MaxDurationSeconds)
+	}
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <group xmlns="urn:oma:xml:poc:list-service" xmlns:rl="urn:ietf:params:xml:ns:resource-lists" xmlns:cp="urn:ietf:params:xml:ns:common-policy" xmlns:ocp="urn:oma:xml:xdm:common-policy" xmlns:oxe="urn:oma:xml:xdm:extensions" xmlns:oxg="urn:oma:xml:xdm:group" xmlns:mcpttgi="urn:3gpp:ns:mcpttGroupInfo:1.0">
   <list-service uri="%s">

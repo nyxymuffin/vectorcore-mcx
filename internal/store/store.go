@@ -47,7 +47,12 @@ type Group struct {
 	// AllowEmergencyCall is the group document's <allow-MCPTT-emergency-call>
 	// element (TS 24.481 clause 7.2.4.2): whether emergency calls may target
 	// this group.
-	AllowEmergencyCall bool      `json:"allow_emergency_call,omitempty"`
+	AllowEmergencyCall bool `json:"allow_emergency_call,omitempty"`
+	// MaxDurationSeconds is the group document's
+	// <on-network-maximum-duration> (TS 24.481 clause 7.2.4.2): the TNG3
+	// group call timer value (TS 24.379 clause 6.3.3.5). 0 means the element
+	// is absent and TNG3 does not run.
+	MaxDurationSeconds int       `json:"max_duration_seconds,omitempty"`
 	CreatedAt          time.Time `json:"created_at,omitempty"`
 	UpdatedAt          time.Time `json:"updated_at,omitempty"`
 }

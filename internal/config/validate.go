@@ -124,6 +124,16 @@ func (c Config) validateListeners() []error {
 			"sip.adhoc.max_participants: %d is not valid (want 0 for no limit, or a positive count)",
 			c.SIP.Adhoc.MaxParticipants))
 	}
+	if c.SIP.Adhoc.MaxCallDurationSeconds < 0 {
+		problems = append(problems, fmt.Errorf(
+			"sip.adhoc.max_call_duration_seconds: %d is not valid (want 0 to disable, or a positive duration)",
+			c.SIP.Adhoc.MaxCallDurationSeconds))
+	}
+	if c.SIP.PrivateCall.MaxDurationSeconds < 0 {
+		problems = append(problems, fmt.Errorf(
+			"sip.private_call.max_duration_seconds: %d is not valid (want 0 to disable, or a positive duration)",
+			c.SIP.PrivateCall.MaxDurationSeconds))
+	}
 	if strings.TrimSpace(c.SIP.TLSListen) != "" {
 		if err := validateListenAddr("sip.tls_listen", c.SIP.TLSListen); err != nil {
 			problems = append(problems, err)

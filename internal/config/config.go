@@ -56,6 +56,7 @@ type SIPConfig struct {
 	RemoteGroups []RemoteGroupConfig `yaml:"remote_groups"`
 	Auth         SIPAuthConfig       `yaml:"auth"`
 	Adhoc        AdhocConfig         `yaml:"adhoc"`
+	PrivateCall  PrivateCallConfig   `yaml:"private_call"`
 }
 
 // AdhocConfig stands in for the ad hoc group call elements of the MCPTT
@@ -69,6 +70,17 @@ type AdhocConfig struct {
 	// MaxParticipants caps the participant list (warning "189" when
 	// exceeded); 0 means no limit.
 	MaxParticipants int `yaml:"max_participants"`
+	// MaxCallDurationSeconds is the ad hoc group call timer of TS 24.379
+	// clause 17.4.2.2 step 13 (max-duration in the service configuration);
+	// 0 disables it.
+	MaxCallDurationSeconds int `yaml:"max_call_duration_seconds"`
+}
+
+// PrivateCallConfig stands in for the per-user "max private call duration"
+// of TS 24.379 clause 11.1.1.4.1 step 10 until user profiles carry it.
+type PrivateCallConfig struct {
+	// MaxDurationSeconds bounds a private call; 0 disables the timer.
+	MaxDurationSeconds int `yaml:"max_duration_seconds"`
 }
 
 // SIPAuthConfig controls service authorization on the SIP interface
