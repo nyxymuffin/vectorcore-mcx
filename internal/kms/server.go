@@ -127,7 +127,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "KMS requests are made with POST", http.StatusMethodNotAllowed)
 		return
 	}
-	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, RootPath), "/")
+	// Clause D.2.4 puts a percent-encoded URI in the request path
+	// ("/keyprov/sip%3Auser%40example.org"), so the split has to happen
+	// on the escaped form. Splitting the decoded path would cut an
+	// identity containing an encoded separator in half, and would leave
+	// each segment decoded twice.
+	rest := strings.Trim(strings.TrimPrefix(r.URL.EscapedPath(), RootPath), "/")
 	segments := strings.Split(rest, "/")
 
 	identity, err := s.authorize(r)

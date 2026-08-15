@@ -380,3 +380,27 @@ func TestWorldReadableKeyMaterialIsRefused(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// Clause D.2.4 example 2 escapes the identity in the request path. The
+// split has to happen before decoding, or an identity containing an
+// encoded separator is silently cut in half.
+func TestKeyProvPathIsSplitBeforeDecoding(t *testing.T) {
+	s := kmsFixture(t)
+	// An identity whose encoded form contains %2F. It is not one this
+	// client may provision, so the interesting part is that the server
+	// sees the whole identity and refuses it, rather than seeing a
+	// truncated one or treating the tail as a timestamp.
+	rr := post(t, s, RootPath+"/keyprov/sip%3Auser%2Fdept%40example.test", "", testIdentity)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", rr.Code, rr.Body.String())
+	}
+
+	// And the ordinary escaped form still resolves to this user.
+	rr = post(t, s, RootPath+"/keyprov/sip%3Auser%40example.test", "", testIdentity)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if set := decodeResponse(t, rr).Message.KeyProv.KeySets[0]; set.UserURI != testIdentity {
+		t.Fatalf("key set issued for %q", set.UserURI)
+	}
+}
