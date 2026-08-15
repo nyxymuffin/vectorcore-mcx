@@ -229,6 +229,7 @@ func (s *Server) handleAdhocInvite(ctx context.Context, send responder, msg *Mes
 		{"Content-Type", fmt.Sprintf(`multipart/mixed;boundary="%s"`, boundary)},
 	}
 	headers = append(recordRouteHeaders(s.recordRouteURI(transport), msg.HeadersFor("Record-Route")), headers...)
+	s.markSessionAnswered(ctx, callID)
 	s.uasInvites.Delete(callID)
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, []byte(multipart))
 }

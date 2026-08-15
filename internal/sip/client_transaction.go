@@ -72,6 +72,10 @@ func (s *Server) t1() time.Duration {
 // unique per transaction.
 func (s *Server) sendTransacted(ctx context.Context, transport, target, branch, method string, raw []byte) <-chan *Message {
 	send := func(b []byte) error { return s.sendOutbound(ctx, transport, target, b) }
+	if s.clientTxSendOverride != nil {
+		override := s.clientTxSendOverride
+		send = func(b []byte) error { return override(transport, target, b) }
+	}
 	return s.startClientTx(ctx, transport, target, branch, method, raw, send)
 }
 

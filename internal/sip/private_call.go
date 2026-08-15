@@ -221,6 +221,7 @@ func (s *Server) handlePrivateInvite(ctx context.Context, send responder, msg *M
 		{"Content-Type", "application/sdp"},
 	}
 	headers = append(recordRouteHeaders(s.recordRouteURI(transport), msg.HeadersFor("Record-Route")), headers...)
+	s.markSessionAnswered(ctx, callID)
 	s.uasInvites.Delete(callID)
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, body)
 }

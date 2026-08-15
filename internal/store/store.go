@@ -235,7 +235,11 @@ type MCPTTCall struct {
 	UpdatedAt            time.Time `json:"updated_at,omitempty"`
 	AnsweredAt           time.Time `json:"answered_at,omitempty"`
 	EstablishedAt        time.Time `json:"established_at,omitempty"`
-	TerminatedAt         time.Time `json:"terminated_at,omitempty"`
+	// SessionExpiresAt is the RFC 4028 session expiration: the advertised
+	// Session-Expires interval from the last answer or refresh. A call still
+	// active past this instant is reaped with BYEs in both directions.
+	SessionExpiresAt time.Time `json:"session_expires_at,omitempty"`
+	TerminatedAt     time.Time `json:"terminated_at,omitempty"`
 }
 
 type CallSummary struct {
@@ -317,6 +321,7 @@ type Store interface {
 	ListCallsByGroup(context.Context, string) ([]MCPTTCall, error)
 	GetCall(context.Context, string) (*MCPTTCall, error)
 	UpdateCallState(context.Context, string, string) error
+	RefreshCallSession(context.Context, string, time.Time) error
 	IncrementCallMedia(context.Context, string, string, int) error
 	UpdateCallRTPStats(context.Context, string, RTPStatsUpdate) error
 	UpdateCallFloorState(context.Context, string, FloorStateUpdate) (bool, error)

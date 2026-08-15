@@ -73,6 +73,7 @@ func main() {
 	go func() { errCh <- sipSrv.ListenTLS(ctx) }()
 	go func() { errCh <- sipSrv.StartOptions(ctx) }()
 	go func() { errCh <- sipSrv.StartTransactionReaper(ctx) }()
+	go func() { errCh <- sipSrv.StartSessionExpiry(ctx) }()
 	go startRegistrationExpiry(ctx, st)
 
 	slog.Info("VectorCore MCX started", "version", version, "config", *configPath, "database_driver", cfg.Database.Driver)

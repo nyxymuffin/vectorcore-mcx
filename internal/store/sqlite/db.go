@@ -284,6 +284,7 @@ CREATE TABLE IF NOT EXISTS mcptt_calls (
 	updated_at TEXT NOT NULL,
 	answered_at TEXT NOT NULL DEFAULT '',
 	established_at TEXT NOT NULL DEFAULT '',
+	session_expires_at TEXT NOT NULL DEFAULT '',
 	terminated_at TEXT NOT NULL DEFAULT ''
 );`)
 	if err != nil {
@@ -349,6 +350,7 @@ FROM affiliations;
 		`ALTER TABLE groups ADD COLUMN chat_group INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE groups ADD COLUMN allow_emergency_call INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN allow_emergency_call INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE mcptt_calls ADD COLUMN session_expires_at TEXT NOT NULL DEFAULT ''`,
 		`UPDATE group_memberships SET role = 'MCPTT User' WHERE LOWER(TRIM(role)) IN ('', 'member', 'user')`,
 		`UPDATE group_memberships SET role = 'MCPTT Administrator' WHERE LOWER(TRIM(role)) IN ('admin', 'administrator')`,
 		`UPDATE group_memberships SET role = 'MCPTT Dispatcher' WHERE LOWER(TRIM(role)) = 'dispatcher'`,
@@ -1208,7 +1210,7 @@ rtp_rejected_packets, rtp_rejected_bytes, rtp_payload_type, rtp_ssrc, rtp_first_
 rtp_expected_packets, rtp_lost_packets, rtp_jitter, rtcp_packets, rtcp_bytes, floor_packets, floor_bytes,
 floor_state, floor_last_event, floor_last_subtype, floor_ssrc, floor_holder, floor_granted_at, floor_released_at, floor_updated_at,
 last_rtp_at, last_rtcp_at, last_floor_at, sdp_offer, sdp_answer, created_at, updated_at, answered_at,
-established_at, terminated_at
+established_at, terminated_at, session_expires_at
 FROM mcptt_calls ORDER BY updated_at DESC, call_id`)
 	if err != nil {
 		return nil, err
@@ -1234,7 +1236,7 @@ rtp_rejected_packets, rtp_rejected_bytes, rtp_payload_type, rtp_ssrc, rtp_first_
 rtp_expected_packets, rtp_lost_packets, rtp_jitter, rtcp_packets, rtcp_bytes, floor_packets, floor_bytes,
 floor_state, floor_last_event, floor_last_subtype, floor_ssrc, floor_holder, floor_granted_at, floor_released_at, floor_updated_at,
 last_rtp_at, last_rtcp_at, last_floor_at, sdp_offer, sdp_answer, created_at, updated_at, answered_at,
-established_at, terminated_at
+established_at, terminated_at, session_expires_at
 FROM mcptt_calls WHERE group_uri = ? AND state NOT IN ('terminated', 'cancelled') ORDER BY updated_at DESC`), groupURI)
 	if err != nil {
 		return nil, err
@@ -1277,7 +1279,7 @@ rtp_rejected_packets, rtp_rejected_bytes, rtp_payload_type, rtp_ssrc, rtp_first_
 rtp_expected_packets, rtp_lost_packets, rtp_jitter, rtcp_packets, rtcp_bytes, floor_packets, floor_bytes,
 floor_state, floor_last_event, floor_last_subtype, floor_ssrc, floor_holder, floor_granted_at, floor_released_at, floor_updated_at,
 last_rtp_at, last_rtcp_at, last_floor_at, sdp_offer, sdp_answer, created_at, updated_at, answered_at,
-established_at, terminated_at
+established_at, terminated_at, session_expires_at
 FROM mcptt_calls WHERE call_id = ?`), callID)
 	v, err := scanCall(row)
 	if ok, err := notFound(err); ok || err != nil {
@@ -1303,6 +1305,14 @@ func (s *Store) UpdateCallState(ctx context.Context, callID, state string) error
 	}
 	args = append(args, callID)
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE mcptt_calls SET `+assignments+` WHERE call_id = ?`), args...)
+	return err
+}
+
+// RefreshCallSession records the RFC 4028 session expiration set at answer
+// time or extended by a session refresh request.
+func (s *Store) RefreshCallSession(ctx context.Context, callID string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE mcptt_calls SET session_expires_at = ?, updated_at = ? WHERE call_id = ?`),
+		formatTime(expiresAt), formatTime(time.Now().UTC()), callID)
 	return err
 }
 
@@ -1618,7 +1628,7 @@ func scanDialog(row dialogScanner) (store.Dialog, error) {
 
 func scanCall(row callScanner) (store.MCPTTCall, error) {
 	var v store.MCPTTCall
-	var created, updated, answered, established, terminated, lastRTP, lastRTCP, lastFloor string
+	var created, updated, answered, established, terminated, sessionExpires, lastRTP, lastRTCP, lastFloor string
 	var floorGranted, floorReleased, floorUpdated string
 	var audioPayloads, floorPayloads, mediaAttrs, floorAttrs string
 	err := row.Scan(&v.ID, &v.CallID, &v.State, &v.InitiatorURI, &v.TargetURI, &v.GroupURI, &v.MCPTTID,
@@ -1631,7 +1641,7 @@ func scanCall(row callScanner) (store.MCPTTCall, error) {
 		&v.RTCPPackets, &v.RTCPBytes, &v.FloorPackets, &v.FloorBytes,
 		&v.FloorState, &v.FloorLastEvent, &v.FloorLastSubtype, &v.FloorSSRC, &v.FloorHolder, &floorGranted, &floorReleased, &floorUpdated,
 		&lastRTP, &lastRTCP, &lastFloor, &v.SDPOffer, &v.SDPAnswer,
-		&created, &updated, &answered, &established, &terminated)
+		&created, &updated, &answered, &established, &terminated, &sessionExpires)
 	if err != nil {
 		return v, err
 	}
@@ -1650,6 +1660,7 @@ func scanCall(row callScanner) (store.MCPTTCall, error) {
 	v.AnsweredAt = parseTime(answered)
 	v.EstablishedAt = parseTime(established)
 	v.TerminatedAt = parseTime(terminated)
+	v.SessionExpiresAt = parseTime(sessionExpires)
 	return v, nil
 }
 

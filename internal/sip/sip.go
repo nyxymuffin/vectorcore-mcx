@@ -37,7 +37,15 @@ type Server struct {
 	notifyCSeq         sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
 	chatSessions       sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
 	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
-	transactions       sync.Map // transactionKey → *serverTransaction, for retransmission absorption (RFC 3261 §17.2)
+
+	// Test hooks for RFC 4028 supervision (per-server, not global - a global
+	// mutated by tests races with the servers of other tests).
+	sessionExpiryOverride       time.Duration
+	sessionReapIntervalOverride time.Duration
+	// clientTxSendOverride, when set, replaces the outbound socket write of
+	// client transactions so tests can capture generated requests.
+	clientTxSendOverride func(transport, target string, packet []byte) error
+	transactions         sync.Map // transactionKey → *serverTransaction, for retransmission absorption (RFC 3261 §17.2)
 
 	// Concurrency limits for the listeners. Each is a counting semaphore: a
 	// slot is taken before a handler starts and released when it returns.
@@ -1022,6 +1030,8 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	if contentType != "" {
 		headers = append(headers, header{"Content-Type", contentType})
 	}
+	// RFC 4028 supervision starts with the answer (clause 6.3.3.2.3.2 item 6).
+	s.markSessionAnswered(ctx, callID)
 	// Final response committed — CANCEL can no longer trigger a 487.
 	s.uasInvites.Delete(callID)
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, body)
@@ -1170,16 +1180,32 @@ func (s *Server) handleInDialogRequest(ctx context.Context, send responder, msg 
 		return
 	}
 	slog.Info("in-dialog request received", "method", msg.Method, "call_id", callID, "dialog", dlg.ID, "source", source, "transport", transport)
+	// RFC 4028 UAS behavior: a re-INVITE or UPDATE inside the dialog is a
+	// session refresh - the response repeats Session-Expires and the
+	// supervision clock restarts (TS 24.379 clause 6.3.3.2.3.2 item 6).
+	refresh := strings.EqualFold(msg.Method, "INVITE") || strings.EqualFold(msg.Method, "UPDATE")
+	if refresh {
+		s.markSessionAnswered(ctx, callID)
+	}
 	if strings.EqualFold(msg.Method, "INVITE") {
 		body, contentType := s.sdpAnswer(msg)
-		headers := []header{{"Contact", fmt.Sprintf("<%s>", s.advertisedSIPURI(transport))}, {"Allow", allowValue}}
+		headers := []header{
+			{"Contact", fmt.Sprintf("<%s>", s.advertisedSIPURI(transport))},
+			{"Allow", allowValue},
+			{"Session-Expires", sessionExpiresHeader},
+			{"Require", "timer"},
+		}
 		if contentType != "" {
 			headers = append(headers, header{"Content-Type", contentType})
 		}
 		s.respond(send, msg, 200, "OK", headers, body)
 		return
 	}
-	s.respond(send, msg, 200, "OK", []header{{"Allow", allowValue}}, nil)
+	headers := []header{{"Allow", allowValue}}
+	if refresh {
+		headers = append(headers, header{"Session-Expires", sessionExpiresHeader}, header{"Require", "timer"})
+	}
+	s.respond(send, msg, 200, "OK", headers, nil)
 }
 
 // sendGroupCallNotifications sends an outbound INVITE to every registered group
@@ -1634,6 +1660,7 @@ func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegC
 		slog.Warn("RX call store failed", "call_id", callID, "member", memberImpu, "err", err)
 		return
 	}
+	s.markSessionAnswered(ctx, callID)
 	established = true
 	slog.Info("RX INVITE established", "call_id", callID, "member", memberImpu,
 		"audio_remote", fmt.Sprintf("%s:%d", rxSDP.Audio.ConnectionIP, rxSDP.Audio.Port),
