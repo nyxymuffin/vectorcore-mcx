@@ -66,6 +66,8 @@ func remoteGroupFixture(t *testing.T, remoteTarget string) (*Server, *sqlite.Sto
 	t.Cleanup(func() { st.Close() })
 
 	cfg := config.Default()
+	// Media anchoring (clause 6.3.2.1.2.1) needs an advertised media host.
+	cfg.Media.AdvertiseHost = "192.0.2.54"
 	cfg.SIP.RemoteGroups = []config.RemoteGroupConfig{{
 		GroupURI:       "sip:remote_group@partner.example",
 		ControllingPSI: "sip:mcptt-ctrl@partner.example",
@@ -137,11 +139,18 @@ func TestRemoteGroupInviteIsForwardedPerSpec(t *testing.T) {
 	for _, want := range []string{
 		"<mcptt-calling-user-id><mcpttURI>sip:caller@example.test</mcpttURI></mcptt-calling-user-id>",
 		"<mcptt-request-uri><mcpttURI>sip:remote_group@partner.example</mcpttURI></mcptt-request-uri>",
-		"m=audio 49170 RTP/AVP 0",
+		// The media is anchored at this participating function
+		// (clause 6.3.2.1.2.1), so the offer carries our endpoints with the
+		// client's codec list, not the client's address.
+		"m=audio 40000 RTP/AVP 0",
+		"c=IN IP4 192.0.2.54",
 	} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("forwarded INVITE missing %q:\n%s", want, raw)
 		}
+	}
+	if strings.Contains(raw, "198.51.100.116") {
+		t.Fatalf("forwarded INVITE leaked the client media address:\n%s", raw)
 	}
 }
 
@@ -243,8 +252,13 @@ func TestRemoteGroupAcceptanceIsRelayed(t *testing.T) {
 			if strings.Contains(resp, "mcptt-session-remote1") {
 				t.Fatalf("relayed 200 leaked the remote session identity instead of mapping it:\n%s", resp)
 			}
-			if !strings.Contains(resp, "c=IN IP4 203.0.113.7") {
-				t.Fatalf("relayed 200 lost the remote SDP answer:\n%s", resp)
+			// The answer is anchored: the client sends media here, not to
+			// the remote controlling function (clause 6.3.2.1.2.1).
+			if !strings.Contains(resp, "c=IN IP4 192.0.2.54") {
+				t.Fatalf("relayed 200 is not anchored at this function:\n%s", resp)
+			}
+			if strings.Contains(resp, "203.0.113.7") {
+				t.Fatalf("relayed 200 leaked the remote media address:\n%s", resp)
 			}
 			if !strings.Contains(resp, "Require: timer") {
 				t.Fatalf("relayed 200 lacks Require: timer:\n%s", resp)
@@ -347,5 +361,87 @@ func TestCancelRelayedToRemoteControlling(t *testing.T) {
 	}
 	if relayed.Header("Call-ID") != forwarded.Header("Call-ID") {
 		t.Fatal("CANCEL Call-ID does not match the relayed INVITE")
+	}
+}
+
+// Media anchoring, TS 24.379 clause 6.3.2.1.2.1: the offer sent to the
+// remote controlling function and the answer relayed to the client both
+// carry this server's media endpoints, and both legs are stored under one
+// session so the media observer bridges them.
+func TestRelayedSessionAnchorsMedia(t *testing.T) {
+	remote := newFakeRemote(t)
+	s, st := remoteGroupFixture(t, remote.addr())
+
+	responsesCh := make(chan []string, 1)
+	go func() {
+		var responses []string
+		s.handleRaw(context.Background(), "192.0.2.52:5060", "udp",
+			[]byte(remoteGroupInvite("anchor-1")), func(b []byte) error {
+				responses = append(responses, string(b))
+				return nil
+			})
+		responsesCh <- responses
+	}()
+
+	relayed := remote.receive(t)
+	// Step 1-2: the forwarded offer advertises our media address, not the
+	// client's 198.51.100.116.
+	offer := ""
+	if part := relayed.Part("application/sdp"); part != nil {
+		offer = string(part.Body)
+	}
+	if !strings.Contains(offer, "c=IN IP4 192.0.2.54") {
+		t.Fatalf("relayed offer is not anchored:\n%s", offer)
+	}
+	if strings.Contains(offer, "198.51.100.116") {
+		t.Fatalf("relayed offer still carries the client address:\n%s", offer)
+	}
+	if !strings.Contains(offer, "m=audio 40000") {
+		t.Fatalf("relayed offer does not use our audio port:\n%s", offer)
+	}
+
+	// The remote answers with its own media address.
+	remoteSDP := "v=0\r\no=- 1 1 IN IP4 203.0.113.7\r\ns=-\r\nc=IN IP4 203.0.113.7\r\nt=0 0\r\n" +
+		"m=audio 50000 RTP/AVP 0\r\nm=application 50002 udp MCPTT\r\n"
+	answer := "SIP/2.0 200 OK\r\n" +
+		"Via: " + relayed.Header("Via") + "\r\n" +
+		"From: " + relayed.Header("From") + "\r\n" +
+		"To: " + relayed.Header("To") + ";tag=remote1\r\n" +
+		"Call-ID: " + relayed.Header("Call-ID") + "\r\n" +
+		"CSeq: " + relayed.Header("CSeq") + "\r\n" +
+		"Contact: <sip:mcptt-ctrl@partner.example>\r\n" +
+		"Content-Type: application/sdp\r\n" +
+		"Content-Length: " + fmt.Sprint(len(remoteSDP)) + "\r\n\r\n" + remoteSDP
+	s.handleRaw(context.Background(), remote.addr(), "udp", []byte(answer), func([]byte) error { return nil })
+
+	responses := <-responsesCh
+	final := responses[len(responses)-1]
+	if !strings.HasPrefix(final, "SIP/2.0 200") {
+		t.Fatalf("client final = %q", firstLine(final))
+	}
+	// The client is told to send media here, not to the remote.
+	if !strings.Contains(final, "c=IN IP4 192.0.2.54") || strings.Contains(final, "203.0.113.7") {
+		t.Fatalf("answer to the client is not anchored:\n%s", final)
+	}
+
+	// Both legs share a session group so the relay bridges them.
+	calls, err := st.ListCalls(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string]int{}
+	for _, c := range calls {
+		if c.GroupURI != "" {
+			groups[c.GroupURI]++
+		}
+	}
+	paired := false
+	for _, n := range groups {
+		if n == 2 {
+			paired = true
+		}
+	}
+	if !paired {
+		t.Fatalf("relayed legs are not paired for the media relay: %+v", groups)
 	}
 }

@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
+	"github.com/svinson1121/vectorcore-mcx/internal/store"
 )
 
 // Remote controlling binding: slice 5 of the Phase 2a design. A group listed
@@ -88,7 +90,13 @@ func (s *Server) relayToRemoteControlling(ctx context.Context, send responder, m
 	// the mcptt-info body with <mcptt-calling-user-id> set to the calling
 	// user's MCPTT ID (clause 10.1.1.3.1.1 step 5). The info body is rebuilt
 	// rather than copied because the inbound leg may not have carried one.
-	offer, _ := s.sdpOffer(msg)
+	clientOffer, _ := s.sdpOffer(msg)
+	// Clause 6.3.2.1.2.1 steps 1-2: the participating function anchors the
+	// media, so the offer toward the remote advertises this server's media
+	// and floor control endpoints rather than the client's.
+	anchorHost := s.mediaAnchorHost()
+	anchorAudio, anchorFloor := s.mediaAnchorPorts()
+	offer := anchorSDP(clientOffer, anchorHost, anchorAudio, anchorFloor)
 	mcpttInfo := fmt.Sprintf(
 		`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params>`+
 			`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
@@ -208,15 +216,79 @@ func (s *Server) relayToRemoteControlling(ctx context.Context, send responder, m
 		return
 	}
 
-	answer := ""
+	remoteAnswer := ""
 	ct := strings.ToLower(resp.Header("Content-Type"))
 	if strings.Contains(ct, "application/sdp") {
-		answer = string(resp.Body)
+		remoteAnswer = string(resp.Body)
 	} else if part := resp.Part("application/sdp"); part != nil {
-		answer = string(part.Body)
+		remoteAnswer = string(part.Body)
 	}
+	// The client is answered with this server's media endpoints, so its RTP
+	// and floor control arrive here and are relayed onward.
+	answer := anchorSDP(remoteAnswer, anchorHost, anchorAudio, anchorFloor)
 
 	sessionURI := s.allocateSessionIdentity(call.CallID)
+
+	// Two call records sharing the session identity as their group: the
+	// client leg and the remote leg. The media observer relays RTP between
+	// legs of the same group, which is what anchoring requires.
+	clientSDP := parseSDP(clientOffer)
+	remoteSDP := parseSDP(remoteAnswer)
+	now := time.Now().UTC()
+	if _, err := s.st.UpsertCall(ctx, store.MCPTTCall{
+		CallID:               call.CallID,
+		State:                "answered",
+		InitiatorURI:         call.InitiatorURI,
+		TargetURI:            call.GroupURI,
+		GroupURI:             sessionURI,
+		MCPTTID:              call.GroupURI,
+		LocalTag:             localTag,
+		RemoteTag:            tagFrom(msg.Header("From")),
+		Transport:            transport,
+		AudioIP:              clientSDP.Audio.ConnectionIP,
+		AudioPort:            clientSDP.Audio.Port,
+		AudioProto:           clientSDP.Audio.Proto,
+		AudioPayloads:        clientSDP.Audio.Payloads,
+		FloorControlIP:       clientSDP.FloorControl.ConnectionIP,
+		FloorControlPort:     clientSDP.FloorControl.Port,
+		FloorControlProto:    clientSDP.FloorControl.Proto,
+		FloorControlPayloads: clientSDP.FloorControl.Payloads,
+		LocalAudioPort:       anchorAudio,
+		LocalFloorPort:       anchorFloor,
+		SDPOffer:             clientOffer,
+		SDPAnswer:            answer,
+		AnsweredAt:           now,
+		EstablishedAt:        now,
+	}); err != nil {
+		slog.Warn("relayed client leg store failed", "call_id", call.CallID, "err", err)
+	}
+	if _, err := s.st.UpsertCall(ctx, store.MCPTTCall{
+		CallID:               relayCallID,
+		State:                "established",
+		InitiatorURI:         s.cfg.MCX.SIPIdentity,
+		TargetURI:            rc.cfg.ControllingPSI,
+		GroupURI:             sessionURI,
+		MCPTTID:              call.GroupURI,
+		RemoteTarget:         remoteContact,
+		Transport:            remoteTransport,
+		SourceAddr:           target,
+		AudioIP:              remoteSDP.Audio.ConnectionIP,
+		AudioPort:            remoteSDP.Audio.Port,
+		AudioProto:           remoteSDP.Audio.Proto,
+		AudioPayloads:        remoteSDP.Audio.Payloads,
+		FloorControlIP:       remoteSDP.FloorControl.ConnectionIP,
+		FloorControlPort:     remoteSDP.FloorControl.Port,
+		FloorControlProto:    remoteSDP.FloorControl.Proto,
+		FloorControlPayloads: remoteSDP.FloorControl.Payloads,
+		LocalAudioPort:       anchorAudio,
+		LocalFloorPort:       anchorFloor,
+		SDPOffer:             offer,
+		SDPAnswer:            remoteAnswer,
+		AnsweredAt:           now,
+		EstablishedAt:        now,
+	}); err != nil {
+		slog.Warn("relayed remote leg store failed", "call_id", relayCallID, "err", err)
+	}
 	headers := []header{
 		{"Contact", fmt.Sprintf("<%s>;+g.3gpp.mcptt;+g.3gpp.icsi-ref=\"urn%%3Aurn-7%%3A3gpp-service.ims.icsi.mcptt\";isfocus", sessionURI)},
 		{"P-Asserted-Identity", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
