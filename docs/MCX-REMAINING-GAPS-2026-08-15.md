@@ -112,11 +112,16 @@ media protection, signalling-plane XML confidentiality/integrity protection,
 GKTP as above, HTTP-1 bearer authorisation (listed under CMS). Access-token
 validation for service authorisation is done.
 
-## Scope questions needing a decision
+## Scope decisions (Nyx, 2026-08-15)
 
-1. MCVideo (TS 24.281): in or out? Never audited; a whole third service.
-2. MBMS/eMBMS items (24.379 §14.2, 24.380 §8.4/10): mark N/A for this
-   deployment, or implement the signalling anyway?
-3. Client-managed XCAP documents vs DB-is-authoritative (affects CMS and GMS
-   write paths).
-4. IdMS: integrate Authentik vs grow the shim.
+1. MCVideo (TS 24.281): OUT OF SCOPE.
+2. MBMS/eMBMS (24.379 §14.2, 24.380 §8.4/10): N/A — the VectorCore
+   ecosystem (github.com/vectorcore-mobile) has no BM-SC, MBMS-GW or MCE,
+   the three components eMBMS requires; there is nothing to announce a
+   bearer on. Revisit only if those ever exist.
+3. XCAP writes: FOLLOW THE SPEC — implement authorised client document
+   management (create/modify/delete writing back to the store), HTTP bearer
+   authorisation per TS 24.482, and change-triggered xcap-diff NOTIFY.
+4. IdMS: FOLLOW THE SPEC — grow the shim into a conformant OIDC provider
+   per TS 24.482 / 33.180 (user authentication, scopes, PKCE, refresh);
+   the trusted-JWKS knob stays so an external IdM remains possible.
