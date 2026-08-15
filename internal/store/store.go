@@ -16,9 +16,13 @@ type User struct {
 	// authorised to activate (TS 24.379 clause 9A.2.2.2.3 step 4A: the
 	// FunctionalAliasList of the user profile). An empty list authorises
 	// nothing.
-	FunctionalAliases []string  `json:"functional_aliases,omitempty"`
-	CreatedAt         time.Time `json:"created_at,omitempty"`
-	UpdatedAt         time.Time `json:"updated_at,omitempty"`
+	FunctionalAliases []string `json:"functional_aliases,omitempty"`
+	// AllowEmergencyCall is the user profile's <allow-emergency-group-call> /
+	// <allow-emergency-private-call> ruleset stand-in (TS 24.379 clause
+	// 6.3.3.1.13.2): whether this user may initiate MCPTT emergency calls.
+	AllowEmergencyCall bool      `json:"allow_emergency_call,omitempty"`
+	CreatedAt          time.Time `json:"created_at,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at,omitempty"`
 }
 
 type Group struct {
@@ -39,9 +43,13 @@ type Group struct {
 	// false, clause 7.2.4.2): members join by calling in and no fan-out
 	// happens. False is a prearranged group, matching the server's historic
 	// fan-out behaviour.
-	ChatGroup bool      `json:"chat_group,omitempty"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	ChatGroup bool `json:"chat_group,omitempty"`
+	// AllowEmergencyCall is the group document's <allow-MCPTT-emergency-call>
+	// element (TS 24.481 clause 7.2.4.2): whether emergency calls may target
+	// this group.
+	AllowEmergencyCall bool      `json:"allow_emergency_call,omitempty"`
+	CreatedAt          time.Time `json:"created_at,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at,omitempty"`
 }
 
 type GroupMembership struct {

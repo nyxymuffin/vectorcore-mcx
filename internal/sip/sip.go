@@ -27,16 +27,17 @@ import (
 )
 
 type Server struct {
-	cfg            config.Config
-	st             store.Store
-	learned        map[string]learnedRoute
-	mu             sync.Mutex
-	pendingInvites sync.Map // callID → chan *Message, for RX INVITE 200 OK dispatch
-	ueSubRoute     sync.Map // lower(IMPU) → store.Subscription, latest subscription per UE for RX INVITE routing
-	uasInvites     sync.Map // callID → *uasInviteState, UAS INVITE pending final response (for CANCEL §9.2)
-	notifyCSeq     sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
-	chatSessions   sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
-	transactions   sync.Map // transactionKey → *serverTransaction, for retransmission absorption (RFC 3261 §17.2)
+	cfg                config.Config
+	st                 store.Store
+	learned            map[string]learnedRoute
+	mu                 sync.Mutex
+	pendingInvites     sync.Map // callID → chan *Message, for RX INVITE 200 OK dispatch
+	ueSubRoute         sync.Map // lower(IMPU) → store.Subscription, latest subscription per UE for RX INVITE routing
+	uasInvites         sync.Map // callID → *uasInviteState, UAS INVITE pending final response (for CANCEL §9.2)
+	notifyCSeq         sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
+	chatSessions       sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
+	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
+	transactions       sync.Map // transactionKey → *serverTransaction, for retransmission absorption (RFC 3261 §17.2)
 
 	// Concurrency limits for the listeners. Each is a counting semaphore: a
 	// slot is taken before a handler starts and released when it returns.
@@ -842,6 +843,45 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// (clause 7.2.4.2), which members join by calling in - no fan-out.
 	group := s.groupByURI(ctx, groupURI)
 	isChat := group != nil && group.ChatGroup
+
+	// MCPTT emergency / imminent peril handling (clauses 6.3.3.1.13.2/.14,
+	// 10.1.1.4.2 steps 4-6, 10.1.2.4.1.1 steps 7-9).
+	emergencyReq := mcpttInfoFlagTrue(msg, "emergency-ind")
+	imminentReq := mcpttInfoFlagTrue(msg, "imminentperil-ind")
+	if emergencyReq || imminentReq {
+		if !s.emergencyCallAuthorised(ctx, initiatorURI, group) {
+			kind := "emergency"
+			if !emergencyReq {
+				kind = "imminent peril"
+			}
+			slog.Warn("MCPTT priority group call not authorised",
+				"call_id", callID, "initiator", initiatorURI, "group_uri", groupURI, "kind", kind)
+			body, contentType := priorityRejectBody()
+			s.respond(send, msg, 403, "Forbidden",
+				[]header{{"Content-Type", contentType}}, []byte(body))
+			return
+		}
+		if emergencyReq {
+			// In-progress emergency state set; an emergency clears any
+			// imminent peril state (10.1.2.4.1.1 step 14 c vii).
+			s.setGroupPriorityState(groupURI, "emergency")
+		} else if s.groupPriorityState(groupURI) != "emergency" {
+			s.setGroupPriorityState(groupURI, "imminent")
+		}
+		slog.Info("MCPTT priority group call accepted",
+			"call_id", callID, "group_uri", groupURI, "state", s.groupPriorityState(groupURI))
+	} else if rp := strings.TrimSpace(msg.Header("Resource-Priority")); rp != "" {
+		// Step 9: a Resource-Priority header claiming a priority level without
+		// the matching indication and without the group being in that state is
+		// refused.
+		if (strings.EqualFold(rp, resourcePriorityEmergency) && s.groupPriorityState(groupURI) != "emergency") ||
+			(strings.EqualFold(rp, resourcePriorityImminent) && s.groupPriorityState(groupURI) == "") {
+			slog.Warn("MCPTT INVITE with unearned Resource-Priority rejected",
+				"call_id", callID, "resource_priority", rp, "group_uri", groupURI)
+			s.respond(send, msg, 403, "Forbidden", nil, nil)
+			return
+		}
+	}
 	if isChat {
 		// Clause 10.1.2.4.1.1 step 12: the <on-network-max-participant-count>
 		// (the generated group document carries 200) bounds the session.
@@ -1041,6 +1081,11 @@ func (s *Server) handleBYE(ctx context.Context, send responder, msg *Message, so
 		// A chat session ends when its last participant leaves
 		// (TS 24.379 clause 10.1.2.4.1.2).
 		s.releaseChatSessionIfEmpty(ctx, call.GroupURI)
+		// The in-progress priority state clears with the group's last leg
+		// (TNG2 supervision of clause 6.3.3.1.16 would otherwise bound it).
+		if peers, err := s.st.ListCallsByGroup(ctx, call.GroupURI); err == nil && len(peers) == 0 {
+			s.setGroupPriorityState(call.GroupURI, "")
+		}
 	}
 }
 
@@ -1402,6 +1447,12 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		hdrs = append(hdrs, header{"Answer-Mode", "Auto"})
 	case answerModeManual:
 		hdrs = append(hdrs, header{"Answer-Mode", "Manual"})
+	}
+	// Clause 6.3.3.1.19: requests generated while the group is in an
+	// in-progress emergency or imminent peril state carry the corresponding
+	// Resource-Priority value.
+	if rp := s.resourcePriorityFor(groupURI); rp != "" {
+		hdrs = append(hdrs, header{"Resource-Priority", rp})
 	}
 	for i := len(inviteRoutes) - 1; i >= 0; i-- {
 		hdrs = append([]header{{"Route", inviteRoutes[i]}}, hdrs...)
