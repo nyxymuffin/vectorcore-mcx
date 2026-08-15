@@ -25,12 +25,13 @@ type Store interface {
 }
 
 type Observer struct {
-	cfg config.Config
-	st  Store
+	cfg    config.Config
+	st     Store
+	queues *floorQueues
 }
 
 func NewObserver(cfg config.Config, st Store) *Observer {
-	return &Observer{cfg: cfg, st: st}
+	return &Observer{cfg: cfg, st: st, queues: newFloorQueues()}
 }
 
 func (o *Observer) Start(ctx context.Context) error {
@@ -172,10 +173,21 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 					slog.Info("MCPTT floor idle", "call_id", call.CallID, "remote", remoteText, "multi_talker_remaining", remaining)
 				}
 				o.notifyFloorPeers(pc, peers, call.CallID, response)
+				// A freed floor goes to the head of the request queue
+				// (clause 6.3.4.4.4).
+				o.queues.remove(queueKey(call), call.CallID)
+				o.grantQueuedRequest(ctx, pc, call)
 				return
 			}
 			if event.Subtype == mcpttQueuePositionReq && o.cfg.Media.FloorAutoGrant {
-				response := buildMCPTTQueuePosition(event.SSRC)
+				// Clause 8.2.11/8.2.12: report the requester's actual queue
+				// position; 254 means not queued (clause 8.2.3.5).
+				pos := o.queues.position(queueKey(call), call.CallID, event.SSRC)
+				positionValue := uint8(queuePositionNotQueued)
+				if pos > 0 {
+					positionValue = uint8(pos)
+				}
+				response := buildMCPTTQueuePositionInfo(event.SSRC, positionValue, 0)
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT queue position send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
@@ -234,6 +246,36 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 					granted = err == nil && applied
 				}
 				if !granted {
+					// TS 24.380 clause 6.3.4.4.2 case b: a client that
+					// negotiated queueing (mc_queueing, clause 14.2.2) is
+					// queued instead of denied and told its position.
+					if negotiatedQueueing(call) {
+						priority := uint8(0)
+						if event.HasPriority {
+							priority = event.Priority
+						}
+						if pos := o.queues.enqueue(queueKey(call), queuedFloorRequest{
+							callID: call.CallID, ssrc: event.SSRC, remote: remoteText, priority: priority,
+						}); pos > 0 {
+							response := buildMCPTTQueuePositionInfo(event.SSRC, uint8(pos), priority)
+							if _, err := pc.WriteTo(response, remote); err != nil {
+								slog.Warn("MCPTT queue position info send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
+							} else {
+								if _, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
+									State:   "queued",
+									Event:   floorEventName(mcpttQueuePosition),
+									Subtype: mcpttQueuePosition,
+									SSRC:    event.SSRC,
+									Holder:  call.FloorHolder,
+								}); err != nil {
+									slog.Warn("MCPTT queue state update failed", "call_id", call.CallID, "err", err)
+								}
+								slog.Info("MCPTT floor request queued", "call_id", call.CallID, "position", pos, "priority", priority)
+							}
+							return
+						}
+						// Queue full: fall through to the deny.
+					}
 					response := buildMCPTTFloorDeny(event.SSRC)
 					if _, err := pc.WriteTo(response, remote); err != nil {
 						slog.Warn("MCPTT floor deny send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
