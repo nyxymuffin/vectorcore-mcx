@@ -34,9 +34,14 @@ type Group struct {
 	MultiTalker bool `json:"multi_talker,omitempty"`
 	// MaxSimultaneousTalkers is the "maximum number of simultaneous talkers"
 	// of TS 24.380 clause 4.1.1.6; 0 falls back to 2 when MultiTalker is set.
-	MaxSimultaneousTalkers int       `json:"max_simultaneous_talkers,omitempty"`
-	CreatedAt              time.Time `json:"created_at,omitempty"`
-	UpdatedAt              time.Time `json:"updated_at,omitempty"`
+	MaxSimultaneousTalkers int `json:"max_simultaneous_talkers,omitempty"`
+	// ChatGroup marks a chat group (TS 24.481 <on-network-invite-members>
+	// false, clause 7.2.4.2): members join by calling in and no fan-out
+	// happens. False is a prearranged group, matching the server's historic
+	// fan-out behaviour.
+	ChatGroup bool      `json:"chat_group,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 type GroupMembership struct {

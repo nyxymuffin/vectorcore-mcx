@@ -704,6 +704,15 @@ func (s *Server) defaultGMSGroup(ctx context.Context, path string) string {
 		multiTalker = `
     <mcpttgi:multi-talker-control>true</mcpttgi:multi-talker-control>`
 	}
+	// TS 24.481 clause 7.2.4.2 <on-network-invite-members>: "true" is a
+	// prearranged group (the server invites the members), "false" a chat
+	// group (members join themselves).
+	inviteMembers := "true"
+	if group.ChatGroup {
+		inviteMembers = "false"
+	}
+	multiTalker = fmt.Sprintf(`
+    <mcpttgi:on-network-invite-members>%s</mcpttgi:on-network-invite-members>`, inviteMembers) + multiTalker
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <group xmlns="urn:oma:xml:poc:list-service" xmlns:rl="urn:ietf:params:xml:ns:resource-lists" xmlns:cp="urn:ietf:params:xml:ns:common-policy" xmlns:ocp="urn:oma:xml:xdm:common-policy" xmlns:oxe="urn:oma:xml:xdm:extensions" xmlns:oxg="urn:oma:xml:xdm:group" xmlns:mcpttgi="urn:3gpp:ns:mcpttGroupInfo:1.0">
   <list-service uri="%s">

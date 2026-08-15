@@ -35,6 +35,7 @@ type Server struct {
 	ueSubRoute     sync.Map // lower(IMPU) → store.Subscription, latest subscription per UE for RX INVITE routing
 	uasInvites     sync.Map // callID → *uasInviteState, UAS INVITE pending final response (for CANCEL §9.2)
 	notifyCSeq     sync.Map // sub.CallID → uint32, per-dialog NOTIFY CSeq counter (RFC 3261 §20.16)
+	chatSessions   sync.Map // lower(groupURI) → session identity URI of the ongoing chat session (TS 24.379 §10.1.2.4.1.1)
 	transactions   sync.Map // transactionKey → *serverTransaction, for retransmission absorption (RFC 3261 §17.2)
 
 	// Concurrency limits for the listeners. Each is a counting semaphore: a
@@ -837,6 +838,19 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		s.respond(send, msg, verdict.Status, verdict.Reason, extra, nil)
 		return
 	}
+	// TS 24.481 <on-network-invite-members>: absent/false marks a chat group
+	// (clause 7.2.4.2), which members join by calling in - no fan-out.
+	group := s.groupByURI(ctx, groupURI)
+	isChat := group != nil && group.ChatGroup
+	if isChat {
+		// Clause 10.1.2.4.1.1 step 12: the <on-network-max-participant-count>
+		// (the generated group document carries 200) bounds the session.
+		if peers, err := s.st.ListCallsByGroup(ctx, groupURI); err == nil && len(peers) >= chatMaxParticipantCount {
+			s.respond(send, msg, 486, "Busy Here",
+				[]header{s.mcpttWarning("122 too many participants")}, nil)
+			return
+		}
+	}
 	if _, err := s.st.CreateDialog(ctx, store.Dialog{
 		CallID:          callID,
 		LocalTag:        localTag,
@@ -928,15 +942,23 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// allocated when the prearranged group session is created, before any
 	// member is invited, so the member legs can carry it (clause 6.3.2.2.3
 	// item 4 d).
-	sessionURI := s.allocateSessionIdentity(callID)
+	var sessionURI string
+	if isChat {
+		// Clause 10.1.2.4.1.1 step 11a: the session identity belongs to the
+		// chat session, created by the first joiner and shared by later ones.
+		sessionURI = s.chatSessionIdentity(groupURI, callID)
+	} else {
+		sessionURI = s.allocateSessionIdentity(callID)
+	}
 
 	// TS 24.379 clause 10.1.1.4.2 step 14 g v: the controlling function
 	// invites the group members before answering the originating leg. This is
 	// the unacknowledged flow; the acknowledged variant (TNG1, clause 6.3.3.3)
 	// waits for required members' answers and arises only when the group
 	// document marks members <on-network-required>, which generated documents
-	// do not yet.
-	if groupURI != "" {
+	// do not yet. A chat group has no fan-out: members join themselves
+	// (clause 10.1.2.4.1.1).
+	if groupURI != "" && !isChat {
 		controlling.EstablishGroupLegs(call)
 	}
 
@@ -1016,6 +1038,9 @@ func (s *Server) handleBYE(ctx context.Context, send responder, msg *Message, so
 	call, _ := s.st.GetCall(ctx, callID)
 	if call != nil && call.GroupURI != "" {
 		s.controllingFor(call.GroupURI).ReleaseGroupLegs(call.GroupURI, callID)
+		// A chat session ends when its last participant leaves
+		// (TS 24.379 clause 10.1.2.4.1.2).
+		s.releaseChatSessionIfEmpty(ctx, call.GroupURI)
 	}
 }
 
@@ -2205,25 +2230,59 @@ func (s *Server) admitGroupInvite(ctx context.Context, initiatorURI, groupURI st
 		return admissionVerdict{Status: 403, Reason: "Forbidden",
 			Warning: "120 user is not affiliated to this group"}
 	}
+	member, err := s.st.IsGroupMember(ctx, userID, groupID)
+	if err != nil {
+		slog.Error("group INVITE membership lookup failed", "err", err, "user_id", userID, "group_id", groupID)
+		return admissionVerdict{Status: 500, Reason: "Server Internal Error"}
+	}
 	affiliated, err := s.st.IsGroupAffiliated(ctx, userID, groupID)
 	if err != nil {
 		slog.Error("group INVITE affiliation lookup failed", "err", err, "user_id", userID, "group_id", groupID)
 		return admissionVerdict{Status: 500, Reason: "Server Internal Error"}
 	}
 	if !affiliated {
+		// TS 24.379 clause 10.1.2.4.1.1 step 6: on a chat group an
+		// unaffiliated caller who is eligible for implicit affiliation
+		// (clause 9.2.2.3.6 - stood in for by group membership) is
+		// affiliated implicitly (clause 9.2.2.3.7) instead of refused.
+		if group := s.groupByURI(ctx, groupURI); group != nil && group.ChatGroup && member {
+			if _, err := s.st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
+				UserID: userID, GroupID: groupID, State: "affiliated",
+			}); err != nil {
+				slog.Warn("chat group implicit affiliation failed", "err", err, "user_id", userID, "group_id", groupID)
+			} else {
+				slog.Info("chat group implicit affiliation", "user", initiatorURI, "group", groupURI)
+				affiliated = true
+			}
+		}
+	}
+	if !affiliated {
 		return admissionVerdict{Status: 403, Reason: "Forbidden",
 			Warning: "120 user is not affiliated to this group"}
-	}
-	member, err := s.st.IsGroupMember(ctx, userID, groupID)
-	if err != nil {
-		slog.Error("group INVITE membership lookup failed", "err", err, "user_id", userID, "group_id", groupID)
-		return admissionVerdict{Status: 500, Reason: "Server Internal Error"}
 	}
 	if !member {
 		return admissionVerdict{Status: 403, Reason: "Forbidden",
 			Warning: "119 user is not authorised to initiate the group call"}
 	}
 	return admissionVerdict{Admitted: true}
+}
+
+// groupByURI returns the enabled group record for a URI, or nil.
+func (s *Server) groupByURI(ctx context.Context, groupURI string) *store.Group {
+	if s.st == nil {
+		return nil
+	}
+	groups, err := s.st.ListGroups(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, g := range groups {
+		if g.Enabled && strings.EqualFold(strings.TrimSpace(g.URI), strings.TrimSpace(groupURI)) {
+			group := g
+			return &group
+		}
+	}
+	return nil
 }
 
 type sdpInfo struct {
@@ -2917,6 +2976,36 @@ func (s *Server) allocateSessionIdentity(callID string) string {
 	s.sessionIdentities.Store(callID, uri)
 	return uri
 }
+
+// chatSessionIdentity returns the session identity of the ongoing chat group
+// session, creating it for the first joiner (TS 24.379 clause 10.1.2.4.1.1
+// step 11 a). Later joiners share the identity; it is released when the last
+// participant leaves.
+func (s *Server) chatSessionIdentity(groupURI, callID string) string {
+	key := strings.ToLower(strings.TrimSpace(groupURI))
+	fresh := fmt.Sprintf("sip:mcptt-session-%s@%s", newToken(), advertiseHostOnly(s.cfg))
+	actual, _ := s.chatSessions.LoadOrStore(key, fresh)
+	uri := actual.(string)
+	s.sessionIdentities.Store(callID, uri)
+	return uri
+}
+
+// releaseChatSessionIfEmpty drops the chat session identity once no active
+// leg remains in the group, so the next call is a new session.
+func (s *Server) releaseChatSessionIfEmpty(ctx context.Context, groupURI string) {
+	if strings.TrimSpace(groupURI) == "" {
+		return
+	}
+	peers, err := s.st.ListCallsByGroup(ctx, groupURI)
+	if err != nil || len(peers) > 0 {
+		return
+	}
+	s.chatSessions.Delete(strings.ToLower(strings.TrimSpace(groupURI)))
+}
+
+// chatMaxParticipantCount mirrors the <on-network-max-participant-count> the
+// generated group document advertises (TS 24.481 clause 7.2.4.2).
+const chatMaxParticipantCount = 200
 
 func (s *Server) recordRouteURI(transport string) string {
 	if !s.cfg.SIP.RecordRoute {
