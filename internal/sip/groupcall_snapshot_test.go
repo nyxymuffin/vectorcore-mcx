@@ -155,9 +155,9 @@ func TestGroupInviteWireExchangeForMember(t *testing.T) {
 	}
 }
 
-// A non-member's INVITE is refused with exactly one 403 and no dialog
-// side effects visible on the wire.
-func TestGroupInviteWireExchangeForNonMember(t *testing.T) {
+// An unknown caller fails the participating function's served-user check
+// (TS 24.379 clause 10.1.1.3.1.1 step 2a): 404 with warning "141".
+func TestGroupInviteWireExchangeForUnknownUser(t *testing.T) {
 	s, _ := groupCallFixture(t)
 
 	raw := strings.Replace(snapshotGroupInvite("snap-reject-1"),
@@ -166,10 +166,36 @@ func TestGroupInviteWireExchangeForNonMember(t *testing.T) {
 	responses := collectResponses(t, s, raw)
 
 	if len(responses) != 1 {
-		t.Fatalf("got %d responses, want exactly the 403:\n%s", len(responses), strings.Join(responses, "\n---\n"))
+		t.Fatalf("got %d responses, want exactly the 404:\n%s", len(responses), strings.Join(responses, "\n---\n"))
 	}
-	if !strings.HasPrefix(responses[0], "SIP/2.0 403 Forbidden") {
-		t.Fatalf("response = %q, want 403 Forbidden", firstLine(responses[0]))
+	if !strings.HasPrefix(responses[0], "SIP/2.0 404 Not Found") {
+		t.Fatalf("response = %q, want 404 Not Found", firstLine(responses[0]))
+	}
+	if !strings.Contains(responses[0], `"141 user unknown to the participating function"`) {
+		t.Fatalf("404 lacks the clause 4.4.2 warning text:\n%s", responses[0])
+	}
+}
+
+// A known but unaffiliated user passes the participating check and fails the
+// controlling function's admission (clause 10.1.1.4.2 step 14 a): 403 "120".
+func TestGroupInviteWireExchangeForUnaffiliatedUser(t *testing.T) {
+	s, st := groupCallFixture(t)
+
+	if _, err := st.CreateUser(context.Background(), store.User{
+		IMPU: "sip:bystander@example.test", MCPTTID: "sip:bystander@example.test", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := strings.Replace(snapshotGroupInvite("snap-reject-2"),
+		"From: <sip:caller@example.test>;tag=from1",
+		"From: <sip:bystander@example.test>;tag=from1", 1)
+	responses := collectResponses(t, s, raw)
+
+	if len(responses) != 1 || !strings.HasPrefix(responses[0], "SIP/2.0 403 Forbidden") {
+		t.Fatalf("responses = %v, want exactly one 403", responses)
+	}
+	if !strings.Contains(responses[0], `"120 user is not affiliated to this group"`) {
+		t.Fatalf("403 lacks the clause 4.4.2 warning text:\n%s", responses[0])
 	}
 }
 
@@ -197,6 +223,16 @@ func TestGroupInviteFansOutRXInviteToMember(t *testing.T) {
 	}
 	if _, err := st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
 		UserID: member.ID, GroupID: groups[0].ID, State: "affiliated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Clause 10.1.1.3.2 step 3: the member must have published an
+	// Answer-Mode Indication before the T-PF may invite them. RFC 4354
+	// encoding: <am-settings><answer-mode>automatic</answer-mode>.
+	if _, err := st.UpsertPublishedState(ctx, store.PublishedState{
+		UserURI: "sip:member2@example.test",
+		Event:   "poc-settings",
+		Body:    `<poc-settings><entity id="m2"><am-settings><answer-mode>automatic</answer-mode></am-settings></entity></poc-settings>`,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -267,8 +303,100 @@ func TestGroupInviteFansOutRXInviteToMember(t *testing.T) {
 			t.Fatalf("RX INVITE missing pinned element %q:\n%s", want, rx)
 		}
 	}
-	// The 2.0 cleanup must hold: no forced commencement mode.
-	if strings.Contains(rx, "Answer-Mode") {
-		t.Fatalf("RX INVITE reasserts Answer-Mode:\n%s", rx)
+	// Clause 10.1.1.3.2 step 7 / 6.3.2.2.5.2 step 8A: the member published
+	// automatic, so the outgoing leg asserts Answer-Mode: Auto - now derived
+	// from the member's own setting, not hardcoded.
+	if !strings.Contains(rx, "Answer-Mode: Auto\r\n") {
+		t.Fatalf("RX INVITE lacks Answer-Mode: Auto for an automatic-answer member:\n%s", rx)
+	}
+	// Clause 6.3.2.2.3 item 4: session identity with the feature tags.
+	if !strings.Contains(rx, "Contact: <sip:mcptt-session-") || !strings.Contains(rx, ";isfocus") {
+		t.Fatalf("RX INVITE Contact lacks the mapped session identity with isfocus:\n%s", rx)
+	}
+}
+
+// A member whose published setting is manual gets Answer-Mode: Manual
+// (clause 6.3.2.2.6.2 step 5, mandatory), and a member with no published
+// settings gets no leg at all (clause 10.1.1.3.2 step 3).
+func TestGroupInviteAnswerModeFollowsMemberSettings(t *testing.T) {
+	s, st := groupCallFixture(t)
+	ctx := context.Background()
+
+	groups, err := st.ListGroups(ctx)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("groups: %v err: %v", groups, err)
+	}
+
+	addMember := func(impu, port string) {
+		t.Helper()
+		u, err := st.CreateUser(ctx, store.User{IMPU: impu, MCPTTID: impu, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.CreateGroupMembership(ctx, store.GroupMembership{
+			UserID: u.ID, GroupID: groups[0].ID, Role: "MCPTT User",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
+			UserID: u.ID, GroupID: groups[0].ID, State: "affiliated",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		p := 0
+		fmt.Sscanf(port, "%d", &p)
+		if _, err := st.UpsertRegistration(ctx, store.Registration{
+			PublicIdentity: impu, Registered: true,
+			ContactURI: "sip:" + impu + "@127.0.0.1:" + port,
+			SourceIP:   "127.0.0.1", SourcePort: p, Transport: "udp",
+			ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	manualSock, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manualSock.Close() })
+	_, manualPort, _ := net.SplitHostPort(manualSock.LocalAddr().String())
+	addMember("sip:manual-member@example.test", manualPort)
+	if _, err := st.UpsertPublishedState(ctx, store.PublishedState{
+		UserURI: "sip:manual-member@example.test",
+		Event:   "poc-settings",
+		Body:    `<poc-settings><entity id="mm"><am-settings><answer-mode>manual</answer-mode></am-settings></entity></poc-settings>`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	silentSock, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = silentSock.Close() })
+	_, silentPort, _ := net.SplitHostPort(silentSock.LocalAddr().String())
+	addMember("sip:no-settings-member@example.test", silentPort)
+	// Deliberately no poc-settings publication for this member.
+
+	responses := collectResponses(t, s, snapshotGroupInvite("snap-am-1"))
+	if len(responses) != 3 {
+		t.Fatalf("inbound leg got %d responses, want 3", len(responses))
+	}
+
+	_ = manualSock.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 8192)
+	n, _, err := manualSock.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("manual member never received its leg: %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "Answer-Mode: Manual\r\n") {
+		t.Fatalf("manual member's INVITE lacks Answer-Mode: Manual:\n%s", buf[:n])
+	}
+
+	// The settings-less member must receive nothing.
+	_ = silentSock.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if n, _, err := silentSock.ReadFrom(buf); err == nil {
+		t.Fatalf("member without poc-settings was invited anyway:\n%s", buf[:n])
 	}
 }

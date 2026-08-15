@@ -268,6 +268,7 @@ type Store interface {
 	DeleteCMSDocument(context.Context, string) error
 
 	UpsertPublishedState(context.Context, PublishedState) (PublishedState, error)
+	GetPublishedState(context.Context, string, string) (*PublishedState, error)
 	CreateSubscription(context.Context, Subscription) (Subscription, error)
 	CreateDialog(context.Context, Dialog) (Dialog, error)
 	UpdateDialogState(context.Context, string, string) error

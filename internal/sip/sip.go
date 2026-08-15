@@ -734,6 +734,19 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		// relay lookups have the correct group to work with.
 		groupURI = mcpttID
 	}
+	// Originating participating function, TS 24.379 clause 10.1.1.3.1.1
+	// steps 2/2a: the calling identity must resolve to a served user. The
+	// binding of clause 7.3 is approximated by the provisioned user table
+	// until service authorisation writes real bindings.
+	if groupURI != "" && !s.servedUserExists(ctx, initiatorURI) {
+		slog.Warn("MCPTT INVITE from unknown user rejected",
+			"call_id", callID, "initiator", initiatorURI,
+			"warning", "141 user unknown to the participating function")
+		s.respond(send, msg, 404, "Not Found",
+			[]header{s.mcpttWarning("141 user unknown to the participating function")}, nil)
+		return
+	}
+
 	// The controlling function of the target group decides admission
 	// (TS 24.379 clause 6.3.3); this participating side only relays the
 	// verdict. Resolution is per group so a remotely homed group later binds
@@ -849,6 +862,12 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 			slog.Info("MCPTT floor granted by SDP", "call_id", callID)
 		}
 	}
+	// TS 24.379 clause 10.1.1.4.2 step 14 e: the session identity is
+	// allocated when the prearranged group session is created, before any
+	// member is invited, so the member legs can carry it (clause 6.3.2.2.3
+	// item 4 d).
+	sessionURI := s.allocateSessionIdentity(callID)
+
 	// TS 24.379 clause 10.1.1.4.2 step 14 g v: the controlling function
 	// invites the group members before answering the originating leg. This is
 	// the unacknowledged flow; the acknowledged variant (TNG1, clause 6.3.3.3)
@@ -865,7 +884,6 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// function's public service identity; Session-Expires with refresher=uac
 	// and the timer option tag per RFC 4028; tdialog, norefersub, explicitsub
 	// and nosub advertised per items 8-10.
-	sessionURI := s.allocateSessionIdentity(callID)
 	headers := []header{
 		{"Contact", fmt.Sprintf("<%s>;+g.3gpp.mcptt;+g.3gpp.icsi-ref=\"urn%%3Aurn-7%%3A3gpp-service.ims.icsi.mcptt\";isfocus", sessionURI)},
 		{"P-Asserted-Identity", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
@@ -1130,11 +1148,22 @@ func (s *Server) sendGroupCallNotifications(ctx context.Context, txCallID, group
 			slog.Debug("group notify: member not registered, skip", "member", impu)
 			continue
 		}
-		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, reg)
+		// TS 24.379 clause 10.1.1.3.2 step 3: without the member's published
+		// Answer-Mode Indication the terminating participating function must
+		// not invite them (a standalone T-PF would answer 480 with warning
+		// "146 T-PF unable to determine the service settings for the called
+		// user"; in-process that verdict is a skipped leg).
+		mode := s.answerModeFor(ctx, impu)
+		if mode == answerModeUnknown {
+			slog.Warn("group notify: member has no usable poc-settings, leg not established",
+				"member", impu, "warning", "146 T-PF unable to determine the service settings for the called user")
+			continue
+		}
+		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, reg, mode)
 	}
 }
 
-func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload string, reg store.Registration) {
+func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload string, reg store.Registration, mode answerMode) {
 	// Call-ID is token-only (no @host) to save ~18 bytes — RFC 3261 allows bare tokens.
 	callID := newToken()
 	localTag := newToken()
@@ -1232,6 +1261,13 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		pai = s.cfg.MCX.SIPIdentity
 	}
 	branch := rfc3261BranchCookie + newToken()
+	// Contact per TS 24.379 clause 6.3.2.2.3 item 4: the MCPTT and ICSI
+	// feature tags, isfocus, and the session identity mapped from the group
+	// session's own identity.
+	sessionURI := s.advertisedSIPURI(transport)
+	if v, ok := s.sessionIdentities.Load(txCallID); ok {
+		sessionURI = v.(string)
+	}
 	hdrs := []header{
 		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(transport), advertiseHost(s.cfg), branch)},
 		{"Max-Forwards", "70"},
@@ -1239,15 +1275,25 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		{"To", fmt.Sprintf("<%s>", memberImpu)},
 		{"Call-ID", callID},
 		{"CSeq", "1 INVITE"},
-		{"Contact", fmt.Sprintf("<%s>", s.advertisedSIPURI(transport))},
+		{"Contact", fmt.Sprintf("<%s>;+g.3gpp.mcptt;+g.3gpp.icsi-ref=\"urn%%3Aurn-7%%3A3gpp-service.ims.icsi.mcptt\";isfocus", sessionURI)},
 		{"P-Asserted-Identity", fmt.Sprintf("<%s>", pai)},
-		// Answer-Mode is deliberately not asserted here. Commencement mode is a
-		// property of the terminating participant (TS 24.379 clause 6.2.3), not
-		// something the controlling side forces; the previous hardcoded
-		// "Auto" existed only to drive one client's auto-answer FSM. The
-		// terminating UE decides per its own configuration until the
-		// answer-mode-from-poc-settings work lands.
+		// Session timer offered per clause 6.3.2.2.3 items 2-3 and 5-6; the
+		// refresher parameter is recommended omitted on this leg.
+		{"Session-Expires", "1800"},
+		{"Supported", "timer, tdialog, norefersub"},
 		{"Content-Type", fmt.Sprintf(`multipart/mixed;boundary="%s"`, boundary)},
+	}
+	// Commencement mode from the member's own published Answer-Mode
+	// Indication (clause 10.1.1.3.2 steps 7-8): "Manual" is mandatory when
+	// the indication says manual (clause 6.3.2.2.6.2 step 5); "Auto" is
+	// local policy for the automatic case (clause 6.3.2.2.5.2 step 8A), and
+	// this server's policy is to assert it so the client commences without
+	// user interaction, which is what its own setting asked for.
+	switch mode {
+	case answerModeAutomatic:
+		hdrs = append(hdrs, header{"Answer-Mode", "Auto"})
+	case answerModeManual:
+		hdrs = append(hdrs, header{"Answer-Mode", "Manual"})
 	}
 	for i := len(inviteRoutes) - 1; i >= 0; i-- {
 		hdrs = append([]header{{"Route", inviteRoutes[i]}}, hdrs...)
@@ -2499,6 +2545,28 @@ func normalizeAffiliationState(state string) string {
 	default:
 		return "noaffiliated"
 	}
+}
+
+// servedUserExists reports whether the URI resolves to a provisioned, enabled
+// user of this participating function.
+func (s *Server) servedUserExists(ctx context.Context, userURI string) bool {
+	if s.st == nil {
+		return true
+	}
+	users, err := s.st.ListUsers(ctx)
+	if err != nil {
+		return false
+	}
+	for _, user := range users {
+		if !user.Enabled {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(user.IMPU), strings.TrimSpace(userURI)) ||
+			strings.EqualFold(strings.TrimSpace(user.MCPTTID), strings.TrimSpace(userURI)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) userGroupIDs(ctx context.Context, userURI, groupURI string) (string, string, bool) {

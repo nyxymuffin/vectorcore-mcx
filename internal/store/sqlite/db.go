@@ -982,6 +982,24 @@ ON CONFLICT(user_uri, event) DO UPDATE SET body=excluded.body, updated_at=exclud
 	return v, err
 }
 
+// GetPublishedState returns the stored PUBLISH state for a user and event
+// package, or nil when the user has never published it.
+func (s *Store) GetPublishedState(ctx context.Context, userURI, event string) (*store.PublishedState, error) {
+	var v store.PublishedState
+	var updated string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, user_uri, event, body, updated_at
+FROM published_state WHERE user_uri = ? AND event = ?`), userURI, event).
+		Scan(&v.ID, &v.UserURI, &v.Event, &v.Body, &updated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.UpdatedAt = parseTime(updated)
+	return &v, nil
+}
+
 func (s *Store) CreateSubscription(ctx context.Context, v store.Subscription) (store.Subscription, error) {
 	v.ID, v.CreatedAt, _ = stampNew(v.ID)
 	if v.ExpiresAt.IsZero() {
