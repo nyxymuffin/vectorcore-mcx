@@ -58,6 +58,11 @@ func (s *Server) handleMessage(ctx context.Context, send responder, msg *Message
 		s.handleMcpttAlertMessage(ctx, send, msg, source)
 		return
 	}
+	// A location-info body is a location report or request (clause 13.2).
+	if locationInfoOf(msg) != "" {
+		s.handleLocationMessage(ctx, send, msg, source)
+		return
+	}
 	slog.Info("SIP MESSAGE received (non-MCData)", "call_id", msg.Header("Call-ID"), "source", source)
 	s.respond(send, msg, 200, "OK", nil, nil)
 }

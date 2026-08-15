@@ -63,6 +63,16 @@ type SIPConfig struct {
 	// <MaxAffiliationsN2> in the generated user profile. 0 means the
 	// default of 200.
 	MaxAffiliationsN2 int `yaml:"max_affiliations_n2"`
+	// Location configures the TS 24.379 clause 13.2 location procedures.
+	Location LocationConfig `yaml:"location"`
+}
+
+// LocationConfig drives the clause 13.2.2 location reporting configuration
+// the participating function pushes to registered clients.
+type LocationConfig struct {
+	// ReportIntervalSeconds is the <PeriodicReport> trigger interval; 0
+	// disables the configuration push (clients may still report).
+	ReportIntervalSeconds int `yaml:"report_interval_seconds"`
 }
 
 // EmergencyConfig stands in for the <emergency-call> elements of the MCPTT

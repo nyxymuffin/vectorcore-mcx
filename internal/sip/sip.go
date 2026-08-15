@@ -39,6 +39,7 @@ type Server struct {
 	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
 	emergencyAlerts    *alertState
 	confSubs           *conferenceSubs
+	locationRequests   sync.Map // lower(target IMPU) → requester IMPU, pending on-demand location fetches (TS 24.379 §13.2.3.2)
 	confVersion        atomic.Int64
 	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
 
@@ -799,6 +800,12 @@ func (s *Server) handleRegister(ctx context.Context, send responder, msg *Messag
 		regRespHeaders = registerResponseHeaders(contactRaw)
 	}
 	s.respond(send, msg, 200, "OK", regRespHeaders, nil)
+	// Clause 13.2.2: push the location reporting configuration to a freshly
+	// registered client (no-op unless sip.location.report_interval_seconds
+	// is set). Detached: the registration answer must not wait on it.
+	if reg.Registered {
+		go s.sendLocationReportingConfiguration(context.Background(), publicIdentity)
+	}
 }
 
 func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Message, source, transport string) {

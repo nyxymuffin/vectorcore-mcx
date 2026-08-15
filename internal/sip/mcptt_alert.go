@@ -213,6 +213,10 @@ func (s *Server) sendAlertReceipt(ctx context.Context, originator, groupURI, cli
 // registered contact per clause 6.3.3.1.11: the MCPTT feature tags in
 // Accept-Contact, the PSI asserted, the MCPTT ICSI in P-Asserted-Service.
 func (s *Server) sendMcpttMessage(ctx context.Context, targetImpu, infoBody string) {
+	s.sendMcpttMessageRaw(ctx, targetImpu, infoBody, "application/vnd.3gpp.mcptt-info+xml")
+}
+
+func (s *Server) sendMcpttMessageRaw(ctx context.Context, targetImpu, body, contentType string) {
 	regs, err := s.st.ListRegistrations(ctx)
 	if err != nil {
 		return
@@ -256,9 +260,9 @@ func (s *Server) sendMcpttMessage(ctx context.Context, targetImpu, infoBody stri
 		{"Accept-Contact", `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt";require;explicit`},
 		{"P-Asserted-Identity", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
 		{"P-Asserted-Service", "urn:urn-7:3gpp-service.ims.icsi.mcptt"},
-		{"Content-Type", "application/vnd.3gpp.mcptt-info+xml"},
+		{"Content-Type", contentType},
 	}
-	out := buildRequest("MESSAGE", targetImpu, hdrs, []byte(infoBody))
+	out := buildRequest("MESSAGE", targetImpu, hdrs, []byte(body))
 	slog.Info("MCPTT notification MESSAGE sending", "target", targetImpu, "addr", target)
 	s.sendTransacted(ctx, transport, target, branch, "MESSAGE", []byte(out))
 }
