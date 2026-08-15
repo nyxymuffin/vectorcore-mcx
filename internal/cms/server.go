@@ -14,17 +14,53 @@ import (
 	"time"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
+	"github.com/svinson1121/vectorcore-mcx/internal/mctoken"
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
 	"github.com/svinson1121/vectorcore-mcx/internal/tlsutil"
 )
 
 type Server struct {
-	cfg config.Config
-	st  store.Store
+	cfg    config.Config
+	st     store.Store
+	tokens *mctoken.Validator
 }
 
 func NewServer(cfg config.Config, st store.Store) *Server {
-	return &Server{cfg: cfg, st: st}
+	s := &Server{cfg: cfg, st: st}
+	if cfg.SIP.Auth.TrustedJWKSFile != "" {
+		validator, err := mctoken.New(cfg.SIP.Auth.TrustedJWKSFile, cfg.SIP.Auth.TrustedIssuer)
+		if err != nil {
+			slog.Error("CMS token validator unavailable", "err", err)
+		} else {
+			s.tokens = validator
+		}
+	}
+	return s
+}
+
+// authorizeHTTP applies TS 24.482 HTTP authorisation: an RFC 6750 bearer
+// access token (validated, MC service ID derived from it) or an
+// X-3GPP-Asserted-Identity from a trusted proxy (TS 24.109). Anything else
+// is a 403.
+func (s *Server) authorizeHTTP(r *http.Request) (string, error) {
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); auth != "" {
+		scheme, token, ok := strings.Cut(auth, " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") {
+			return "", fmt.Errorf("authorization scheme is not Bearer")
+		}
+		if s.tokens == nil {
+			return "", fmt.Errorf("no trusted JWKS configured; bearer tokens cannot be validated")
+		}
+		id, err := s.tokens.Validate(strings.TrimSpace(token))
+		if err != nil {
+			return "", fmt.Errorf("bearer token: %w", err)
+		}
+		return id, nil
+	}
+	if asserted := strings.TrimSpace(r.Header.Get("X-3GPP-Asserted-Identity")); asserted != "" {
+		return strings.Trim(asserted, `"<>`), nil
+	}
+	return "", fmt.Errorf("no Authorization bearer token and no X-3GPP-Asserted-Identity")
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -72,6 +108,18 @@ func (s *Server) handleXCAP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/xcap-root")
 	if path == "" {
 		path = "/"
+	}
+	// TS 24.482: without a bearer access token or an asserted identity the
+	// request is refused with 403.
+	if s.cfg.CMS.RequireAuthorization {
+		identity, err := s.authorizeHTTP(r)
+		if err != nil {
+			setXCAPResult(r, "unauthorized")
+			slog.Warn("CMS/XCAP request refused", "err", err, "path", path, "remote", r.RemoteAddr)
+			http.Error(w, "authorization required", http.StatusForbidden)
+			return
+		}
+		setXCAPIdentity(r, identity)
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -1181,7 +1229,27 @@ func logRequests(next http.Handler) http.Handler {
 type xcapRequestInfoKey struct{}
 
 type xcapRequestInfo struct {
-	result string
+	result   string
+	identity string
+}
+
+// setXCAPIdentity records the authenticated MC service ID of the request
+// (TS 24.482: the identity derived from the bearer token).
+func setXCAPIdentity(r *http.Request, identity string) {
+	info, ok := r.Context().Value(xcapRequestInfoKey{}).(*xcapRequestInfo)
+	if !ok || info == nil {
+		return
+	}
+	info.identity = identity
+}
+
+// xcapIdentity returns the authenticated MC service ID, or "".
+func xcapIdentity(r *http.Request) string {
+	info, ok := r.Context().Value(xcapRequestInfoKey{}).(*xcapRequestInfo)
+	if !ok || info == nil {
+		return ""
+	}
+	return info.identity
 }
 
 func setXCAPResult(r *http.Request, result string) {

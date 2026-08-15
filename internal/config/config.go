@@ -130,6 +130,13 @@ type CMSConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Listen   string `yaml:"listen"`
 	XCAPRoot string `yaml:"xcap_root"`
+	// RequireAuthorization enforces TS 24.482 HTTP authorisation on the XCAP
+	// endpoints: requests must carry an RFC 6750 bearer access token (or an
+	// X-3GPP-Asserted-Identity from a trusted proxy) or be refused 403. The
+	// token is validated against sip.auth.trusted_jwks_file. Off by default
+	// so the unauthenticated bootstrap fetch of ue-init-config keeps working
+	// in development; production deployments should enable it.
+	RequireAuthorization bool `yaml:"require_authorization"`
 }
 
 type MediaConfig struct {
