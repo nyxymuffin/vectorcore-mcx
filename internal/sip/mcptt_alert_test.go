@@ -3,6 +3,7 @@ package sip
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -65,13 +66,7 @@ func TestEmergencyAlertRaiseAndCancel(t *testing.T) {
 	}
 
 	// The member's notification (6.3.3.1.11).
-	buf := make([]byte, 8192)
-	_ = memberSock.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, _, err := memberSock.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("member never got the alert notification: %v", err)
-	}
-	notify := string(buf[:n])
+	notify := awaitDatagram(t, memberSock, "<alert-ind>true</alert-ind>")
 	for _, want := range []string{
 		"MESSAGE sip:member2@example.test SIP/2.0",
 		"P-Asserted-Service: urn:urn-7:3gpp-service.ims.icsi.mcptt",
@@ -85,12 +80,7 @@ func TestEmergencyAlertRaiseAndCancel(t *testing.T) {
 	}
 
 	// The originator's receipt (6.3.3.1.20).
-	_ = callerSock.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, _, err = callerSock.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("originator never got the receipt: %v", err)
-	}
-	receipt := string(buf[:n])
+	receipt := awaitDatagram(t, callerSock, "<alert-ind-rcvd>true</alert-ind-rcvd>")
 	for _, want := range []string{
 		"<alert-ind-rcvd>true</alert-ind-rcvd>",
 		"<mcptt-client-id>client-42</mcptt-client-id>",
@@ -105,14 +95,7 @@ func TestEmergencyAlertRaiseAndCancel(t *testing.T) {
 	if len(responses) != 1 || !strings.HasPrefix(responses[0], "SIP/2.0 200") {
 		t.Fatalf("cancel responses = %v, want 200", responses)
 	}
-	_ = memberSock.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, _, err = memberSock.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("member never got the cancellation: %v", err)
-	}
-	if !strings.Contains(string(buf[:n]), "<alert-ind>false</alert-ind>") {
-		t.Fatalf("cancellation lacks alert-ind false:\n%s", buf[:n])
-	}
+	awaitDatagram(t, memberSock, "<alert-ind>false</alert-ind>")
 
 	// Cancelling again finds nothing outstanding.
 	responses = collectResponses(t, s, alertMessage("alert-3", "sip:test_group@example.test", "false"))
@@ -144,4 +127,37 @@ func TestEmergencyAlertUnknownGroup(t *testing.T) {
 	if len(responses) != 1 || !strings.Contains(responses[0], `"163 the group identity indicated in the request does not exist"`) {
 		t.Fatalf("responses = %v, want 404 with warning 163", responses)
 	}
+}
+
+// awaitDatagram reads from sock until a datagram contains want, or the
+// deadline expires.
+//
+// A test that never answers a notification MESSAGE will see it again:
+// the server's non-INVITE client transaction retransmits on timer E
+// (RFC 3261 clause 17.1.2.2) until it gets a response. So the datagram
+// carrying the next thing a test is waiting for can arrive behind one or
+// more retransmissions of the last one, which is a matter of timing
+// rather than of correctness, and showed up as an intermittent failure
+// on a loaded machine but not on an idle one.
+func awaitDatagram(t *testing.T, sock net.PacketConn, want string) string {
+	t.Helper()
+	buf := make([]byte, 8192)
+	deadline := time.Now().Add(5 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		_ = sock.SetReadDeadline(deadline)
+		n, _, err := sock.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		last = string(buf[:n])
+		if strings.Contains(last, want) {
+			return last
+		}
+	}
+	if last == "" {
+		t.Fatalf("nothing containing %q arrived", want)
+	}
+	t.Fatalf("no datagram contained %q; the last one was:\n%s", want, last)
+	return ""
 }
