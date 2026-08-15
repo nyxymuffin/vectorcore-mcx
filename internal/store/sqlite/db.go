@@ -285,7 +285,17 @@ CREATE TABLE IF NOT EXISTS mcptt_calls (
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ue_contacts (
+	_, err = s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS functional_aliases (
+	id TEXT PRIMARY KEY,
+	mcptt_id TEXT NOT NULL,
+	alias_uri TEXT NOT NULL,
+	status TEXT NOT NULL,
+	p_id_fa TEXT NOT NULL DEFAULT '',
+	expires_at TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	UNIQUE(mcptt_id, alias_uri)
+);
+CREATE TABLE IF NOT EXISTS ue_contacts (
 	ue_ip   TEXT PRIMARY KEY,
 	mcptt_id TEXT NOT NULL DEFAULT '',
 	updated_at TEXT NOT NULL DEFAULT ''
@@ -328,6 +338,7 @@ FROM affiliations;
 		}
 	}
 	for _, stmt := range []string{
+		`ALTER TABLE users ADD COLUMN functional_aliases TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE groups ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0`,
 		`UPDATE group_memberships SET role = 'MCPTT User' WHERE LOWER(TRIM(role)) IN ('', 'member', 'user')`,
 		`UPDATE group_memberships SET role = 'MCPTT Administrator' WHERE LOWER(TRIM(role)) IN ('admin', 'administrator')`,
@@ -580,7 +591,7 @@ func notFound(err error) (bool, error) {
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]store.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, impi, impu, mcptt_id, display_name, enabled, created_at, updated_at FROM users ORDER BY display_name, mcptt_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, created_at, updated_at FROM users ORDER BY display_name, mcptt_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -589,11 +600,12 @@ func (s *Store) ListUsers(ctx context.Context) ([]store.User, error) {
 	for rows.Next() {
 		var v store.User
 		var enabled int
-		var created, updated string
-		if err := rows.Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &created, &updated); err != nil {
+		var aliases, created, updated string
+		if err := rows.Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &aliases, &created, &updated); err != nil {
 			return nil, err
 		}
 		v.Enabled = scanBool(enabled)
+		v.FunctionalAliases = unmarshalStrings(aliases)
 		v.CreatedAt = parseTime(created)
 		v.UpdatedAt = parseTime(updated)
 		out = append(out, v)
@@ -604,22 +616,61 @@ func (s *Store) ListUsers(ctx context.Context) ([]store.User, error) {
 func (s *Store) GetUser(ctx context.Context, id string) (*store.User, error) {
 	var v store.User
 	var enabled int
-	var created, updated string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, impi, impu, mcptt_id, display_name, enabled, created_at, updated_at FROM users WHERE id = ?`), id).
-		Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &created, &updated)
+	var aliases, created, updated string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, created_at, updated_at FROM users WHERE id = ?`), id).
+		Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &aliases, &created, &updated)
 	if ok, err := notFound(err); ok || err != nil {
 		return nil, err
 	}
 	v.Enabled = scanBool(enabled)
+	v.FunctionalAliases = unmarshalStrings(aliases)
 	v.CreatedAt = parseTime(created)
 	v.UpdatedAt = parseTime(updated)
 	return &v, nil
 }
 
+// UpsertFunctionalAliasStatus stores one functional alias information entry
+// (TS 24.379 clause 9A.2.2.2.2), keyed on (MCPTT ID, alias).
+func (s *Store) UpsertFunctionalAliasStatus(ctx context.Context, v store.FunctionalAliasStatus) (store.FunctionalAliasStatus, error) {
+	now := time.Now().UTC()
+	if v.ID == "" {
+		v.ID = uuid.NewString()
+	}
+	v.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO functional_aliases (id, mcptt_id, alias_uri, status, p_id_fa, expires_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(mcptt_id, alias_uri) DO UPDATE SET status=excluded.status, p_id_fa=excluded.p_id_fa, expires_at=excluded.expires_at, updated_at=excluded.updated_at`),
+		v.ID, v.MCPTTID, v.AliasURI, v.Status, v.PIDFA, formatTime(v.ExpiresAt), formatTime(v.UpdatedAt))
+	return v, err
+}
+
+// ListFunctionalAliasStatuses returns the functional alias entries of one
+// MCPTT user.
+func (s *Store) ListFunctionalAliasStatuses(ctx context.Context, mcpttID string) ([]store.FunctionalAliasStatus, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, mcptt_id, alias_uri, status, p_id_fa, expires_at, updated_at
+FROM functional_aliases WHERE mcptt_id = ? ORDER BY alias_uri`), mcpttID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.FunctionalAliasStatus
+	for rows.Next() {
+		var v store.FunctionalAliasStatus
+		var expires, updated string
+		if err := rows.Scan(&v.ID, &v.MCPTTID, &v.AliasURI, &v.Status, &v.PIDFA, &expires, &updated); err != nil {
+			return nil, err
+		}
+		v.ExpiresAt = parseTime(expires)
+		v.UpdatedAt = parseTime(updated)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CreateUser(ctx context.Context, v store.User) (store.User, error) {
 	v.ID, v.CreatedAt, v.UpdatedAt = stampNew(v.ID)
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO users (id, impi, impu, mcptt_id, display_name, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO users (id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		v.ID, v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), marshalStrings(v.FunctionalAliases), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -631,8 +682,8 @@ func (s *Store) UpdateUser(ctx context.Context, id string, v store.User) (*store
 	v.ID = id
 	v.CreatedAt = current.CreatedAt
 	v.UpdatedAt = time.Now().UTC()
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE users SET impi=?, impu=?, mcptt_id=?, display_name=?, enabled=?, updated_at=? WHERE id=?`),
-		v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), formatTime(v.UpdatedAt), id)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE users SET impi=?, impu=?, mcptt_id=?, display_name=?, enabled=?, functional_aliases=?, updated_at=? WHERE id=?`),
+		v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), marshalStrings(v.FunctionalAliases), formatTime(v.UpdatedAt), id)
 	return &v, err
 }
 

@@ -6,14 +6,19 @@ import (
 )
 
 type User struct {
-	ID          string    `json:"id,omitempty"`
-	IMPI        string    `json:"impi"`
-	IMPU        string    `json:"impu"`
-	MCPTTID     string    `json:"mcptt_id"`
-	DisplayName string    `json:"display_name"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	ID          string `json:"id,omitempty"`
+	IMPI        string `json:"impi"`
+	IMPU        string `json:"impu"`
+	MCPTTID     string `json:"mcptt_id"`
+	DisplayName string `json:"display_name"`
+	Enabled     bool   `json:"enabled"`
+	// FunctionalAliases lists the functional alias URIs this user is
+	// authorised to activate (TS 24.379 clause 9A.2.2.2.3 step 4A: the
+	// FunctionalAliasList of the user profile). An empty list authorises
+	// nothing.
+	FunctionalAliases []string  `json:"functional_aliases,omitempty"`
+	CreatedAt         time.Time `json:"created_at,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at,omitempty"`
 }
 
 type Group struct {
@@ -269,6 +274,8 @@ type Store interface {
 
 	UpsertPublishedState(context.Context, PublishedState) (PublishedState, error)
 	GetPublishedState(context.Context, string, string) (*PublishedState, error)
+	UpsertFunctionalAliasStatus(context.Context, FunctionalAliasStatus) (FunctionalAliasStatus, error)
+	ListFunctionalAliasStatuses(context.Context, string) ([]FunctionalAliasStatus, error)
 	CreateSubscription(context.Context, Subscription) (Subscription, error)
 	CreateDialog(context.Context, Dialog) (Dialog, error)
 	UpdateDialogState(context.Context, string, string) error
@@ -324,4 +331,17 @@ type FloorStateUpdate struct {
 	// requests from different SSRCs can both conclude the floor is free. The
 	// guard turns the write into a compare-and-swap, letting exactly one win.
 	ExpectHolder *string
+}
+
+// FunctionalAliasStatus is one functional alias information entry of an MCPTT
+// user information entry (TS 24.379 clause 9A.2.2.2.2): alias, status,
+// expiration, and the p-id-fa of the publication that set it.
+type FunctionalAliasStatus struct {
+	ID        string    `json:"id,omitempty"`
+	MCPTTID   string    `json:"mcptt_id"`
+	AliasURI  string    `json:"alias_uri"`
+	Status    string    `json:"status"`
+	PIDFA     string    `json:"p_id_fa,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }

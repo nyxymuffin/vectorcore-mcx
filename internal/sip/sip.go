@@ -462,6 +462,14 @@ func (s *Server) sendOptions(ctx context.Context) {
 func (s *Server) handlePublish(ctx context.Context, send responder, msg *Message) {
 	event := strings.TrimSpace(msg.Header("Event"))
 	if strings.EqualFold(event, "presence") {
+		// Functional alias publications share the presence event package with
+		// affiliation (TS 24.379 clause 9A.2.2.2.3); the <functionalAlias>
+		// element is the discriminator. Previously these were swallowed by the
+		// affiliation path with a misleading 200.
+		if pidfCarriesFunctionalAlias(msg) {
+			s.handleFunctionalAliasPublish(ctx, send, msg)
+			return
+		}
 		s.handlePresencePublish(ctx, send, msg)
 		return
 	}
@@ -652,8 +660,17 @@ func (s *Server) handleRegister(ctx context.Context, send responder, msg *Messag
 
 func (s *Server) handleSubscribe(ctx context.Context, send responder, msg *Message, source, transport string) {
 	event := strings.TrimSpace(msg.Header("Event"))
-	if event == "" {
-		event = "affiliation"
+	// Only known event packages are served. Defaulting the absent or unknown
+	// case to affiliation answered subscriptions to other packages (functional
+	// alias determination, conference) with affiliation data - a silent
+	// corruption the audit flagged. RFC 6665 wants 489 with the supported
+	// packages listed in Allow-Events.
+	switch strings.ToLower(event) {
+	case "presence", "xcap-diff", "affiliation":
+	default:
+		s.respond(send, msg, 489, "Bad Event",
+			[]header{{"Allow-Events", "presence, xcap-diff"}}, nil)
+		return
 	}
 	// Use the IMS-validated SIP identity (P-Asserted-Identity / From header) as the
 	// authoritative subscriber URI. The <mcptt-request-uri> in the MCPTT-Info body
