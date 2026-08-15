@@ -776,8 +776,15 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// <session-type>adhoc</session-type> is an ad hoc group call; its
 	// membership comes from the request, not from group documents, so it takes
 	// its own controlling path (clause 17.4.2.2).
-	if sessionTypeFromBody(msg) == "adhoc" {
+	switch sessionTypeFromBody(msg) {
+	case "adhoc":
 		s.handleAdhocInvite(ctx, send, msg, source, transport)
+		return
+	case "private":
+		// TS 24.379 clause 11.1.1: private call - the callee comes from the
+		// resource-lists body and is actually invited before the caller's
+		// final response. (First-to-answer stays on the legacy path.)
+		s.handlePrivateInvite(ctx, send, msg, source, transport)
 		return
 	}
 	// Originating participating function, TS 24.379 clause 10.1.1.3.1.1
@@ -1214,11 +1221,15 @@ func (s *Server) sendGroupCallNotifications(ctx context.Context, txCallID, group
 				"member", impu, "warning", "146 T-PF unable to determine the service settings for the called user")
 			continue
 		}
-		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, "prearranged", reg, mode)
+		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, "prearranged", reg, mode, nil)
 	}
 }
 
-func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload, sessionType string, reg store.Registration, mode answerMode) {
+// sendRXInvite builds and sends a terminating leg toward a member. done, when
+// non-nil, receives the leg outcome (established or not) — the private call
+// flow answers its originator only after the callee answers (TS 24.379 clause
+// 11.1.1.4.2), unlike the group flow which only orders invites before its 200.
+func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload, sessionType string, reg store.Registration, mode answerMode, done chan bool) {
 	// Call-ID is token-only (no @host) to save ~18 bytes — RFC 3261 allows bare tokens.
 	callID := newToken()
 	localTag := newToken()
@@ -1264,17 +1275,33 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	if callerURI == "" {
 		callerURI = s.cfg.MCX.SIPIdentity
 	}
-	mcpttInfoBody := fmt.Sprintf(
-		`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">`+
-			`<mcptt-Params>`+
-			`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
-			`<mcptt-calling-user-id><mcpttURI>%s</mcpttURI></mcptt-calling-user-id>`+
-			`<session-type>%s</session-type>`+
-			`<mcptt-calling-group-id><mcpttURI>%s</mcpttURI></mcptt-calling-group-id>`+
-			`</mcptt-Params>`+
-			`</mcpttinfo>`,
-		groupURI, callerURI, sessionType, groupURI,
-	)
+	var mcpttInfoBody string
+	if sessionType == "private" {
+		// Clause 11.1.1.4.1 step 4: the <mcptt-request-uri> carries the
+		// invited user's MCPTT ID; a private call has no calling group.
+		mcpttInfoBody = fmt.Sprintf(
+			`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">`+
+				`<mcptt-Params>`+
+				`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
+				`<mcptt-calling-user-id><mcpttURI>%s</mcpttURI></mcptt-calling-user-id>`+
+				`<session-type>private</session-type>`+
+				`</mcptt-Params>`+
+				`</mcpttinfo>`,
+			memberImpu, callerURI,
+		)
+	} else {
+		mcpttInfoBody = fmt.Sprintf(
+			`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">`+
+				`<mcptt-Params>`+
+				`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
+				`<mcptt-calling-user-id><mcpttURI>%s</mcpttURI></mcptt-calling-user-id>`+
+				`<session-type>%s</session-type>`+
+				`<mcptt-calling-group-id><mcpttURI>%s</mcpttURI></mcptt-calling-group-id>`+
+				`</mcptt-Params>`+
+				`</mcpttinfo>`,
+			groupURI, callerURI, sessionType, groupURI,
+		)
+	}
 
 	const boundary = "mcxasboundary"
 	multipartBody := fmt.Sprintf(
@@ -1367,11 +1394,18 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	// member's response and runs detached so the caller can proceed to answer
 	// the originator (TS 24.379 clause 10.1.1.4.2 step 14 g v orders member
 	// invitations before the originating leg's final response).
+	answerTimeout := 5 * time.Second
+	if done != nil {
+		// A private callee may answer manually; allow a ringing interval
+		// instead of the group flow's short window.
+		answerTimeout = 30 * time.Second
+	}
 	go s.completeRXLeg(ctx, ch, rxLegContext{
 		callID: callID, txCallID: txCallID, groupURI: groupURI,
 		initiatorURI: initiatorURI, memberImpu: memberImpu, localTag: localTag,
 		target: target, transport: transport,
 		audioPort: audioPort, rtcpPort: rtcpPort, sdpBody: sdpBody,
+		done: done, answerTimeout: answerTimeout,
 	})
 }
 
@@ -1383,6 +1417,9 @@ type rxLegContext struct {
 	localTag, target, transport string
 	audioPort, rtcpPort         int
 	sdpBody                     string
+	// done, when non-nil, receives whether the leg was established.
+	done          chan bool
+	answerTimeout time.Duration
 }
 
 func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegContext) {
@@ -1392,7 +1429,20 @@ func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegC
 	audioPort, rtcpPort, sdpBody := leg.audioPort, leg.rtcpPort, leg.sdpBody
 	_ = initiatorURI
 	defer s.pendingInvites.Delete(callID)
-	timer := time.NewTimer(5 * time.Second)
+	established := false
+	if leg.done != nil {
+		defer func() {
+			select {
+			case leg.done <- established:
+			default:
+			}
+		}()
+	}
+	answerTimeout := leg.answerTimeout
+	if answerTimeout <= 0 {
+		answerTimeout = 5 * time.Second
+	}
+	timer := time.NewTimer(answerTimeout)
 	defer timer.Stop()
 	var resp *Message
 	select {
@@ -1506,6 +1556,7 @@ func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegC
 		slog.Warn("RX call store failed", "call_id", callID, "member", memberImpu, "err", err)
 		return
 	}
+	established = true
 	slog.Info("RX INVITE established", "call_id", callID, "member", memberImpu,
 		"audio_remote", fmt.Sprintf("%s:%d", rxSDP.Audio.ConnectionIP, rxSDP.Audio.Port),
 		"group_uri", groupURI, "tx_call_id", txCallID)

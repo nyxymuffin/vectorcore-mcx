@@ -298,6 +298,6 @@ func (s *Server) establishAdhocLegs(ctx context.Context, txCallID, adhocID, init
 				"member", impu, "warning", "146 T-PF unable to determine the service settings for the called user")
 			continue
 		}
-		s.sendRXInvite(context.Background(), txCallID, adhocID, initiatorURI, impu, audioPayload, "adhoc", reg, mode)
+		s.sendRXInvite(context.Background(), txCallID, adhocID, initiatorURI, impu, audioPayload, "adhoc", reg, mode, nil)
 	}
 }
