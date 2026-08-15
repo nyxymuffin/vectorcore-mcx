@@ -55,6 +55,20 @@ type SIPConfig struct {
 	// function (design D3). Groups not listed here home locally.
 	RemoteGroups []RemoteGroupConfig `yaml:"remote_groups"`
 	Auth         SIPAuthConfig       `yaml:"auth"`
+	Adhoc        AdhocConfig         `yaml:"adhoc"`
+}
+
+// AdhocConfig stands in for the ad hoc group call elements of the MCPTT
+// service configuration document (TS 24.379 clause 17.4.2.2 steps 5 and 6)
+// until the CMS generates one: whether the system supports ad hoc group
+// calls, and the maximum number of participants per call.
+type AdhocConfig struct {
+	// Enabled defaults to true; false makes the controlling function answer
+	// ad hoc originations 403 with warning "186".
+	Enabled bool `yaml:"enabled"`
+	// MaxParticipants caps the participant list (warning "189" when
+	// exceeded); 0 means no limit.
+	MaxParticipants int `yaml:"max_participants"`
 }
 
 // SIPAuthConfig controls service authorization on the SIP interface
@@ -247,6 +261,7 @@ func Load(path string) (Config, error) {
 func Default() Config {
 	cfg := Config{}
 	cfg.SIP.RecordRoute = true
+	cfg.SIP.Adhoc.Enabled = true
 	cfg.Media.Enabled = true
 	cfg.Media.FloorAutoGrant = true
 	cfg.applyDefaults()

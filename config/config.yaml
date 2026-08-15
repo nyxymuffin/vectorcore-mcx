@@ -55,6 +55,17 @@ sip:
     trusted_jwks_file: ""
     # When set, the token's iss claim must match exactly.
     trusted_issuer: ""
+  # Ad hoc group calls (TS 24.379 clause 17): a caller supplies the
+  # participant list in the INVITE (application/resource-lists+xml) instead of
+  # using a provisioned group. These two knobs stand in for the ad hoc
+  # elements of the MCPTT service configuration document (clause 17.4.2.2
+  # steps 5 and 6) until the CMS generates one.
+  adhoc:
+    # false answers ad hoc originations 403 with warning "186".
+    enabled: true
+    # Maximum participants per ad hoc call (403 with warning "189" when
+    # exceeded); 0 means no limit.
+    max_participants: 0
 
 cms:
   enabled: true

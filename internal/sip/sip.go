@@ -772,6 +772,14 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		// relay lookups have the correct group to work with.
 		groupURI = mcpttID
 	}
+	// TS 24.379 clause 17: an INVITE whose mcptt-info carries
+	// <session-type>adhoc</session-type> is an ad hoc group call; its
+	// membership comes from the request, not from group documents, so it takes
+	// its own controlling path (clause 17.4.2.2).
+	if sessionTypeFromBody(msg) == "adhoc" {
+		s.handleAdhocInvite(ctx, send, msg, source, transport)
+		return
+	}
 	// Originating participating function, TS 24.379 clause 10.1.1.3.1.1
 	// steps 2/2a: the calling identity must resolve to a served user. The
 	// binding of clause 7.3 is approximated by the provisioned user table
@@ -1206,11 +1214,11 @@ func (s *Server) sendGroupCallNotifications(ctx context.Context, txCallID, group
 				"member", impu, "warning", "146 T-PF unable to determine the service settings for the called user")
 			continue
 		}
-		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, reg, mode)
+		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, "prearranged", reg, mode)
 	}
 }
 
-func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload string, reg store.Registration, mode answerMode) {
+func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload, sessionType string, reg store.Registration, mode answerMode) {
 	// Call-ID is token-only (no @host) to save ~18 bytes — RFC 3261 allows bare tokens.
 	callID := newToken()
 	localTag := newToken()
@@ -1249,8 +1257,9 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		host, host, audioPort, audioPayload, floorPort,
 	)
 
-	// MCPTT info body classifying the terminating leg as a prearranged group
-	// call (TS 24.379 clause 15.1.4, mcpttinfo schema in Annex F.1).
+	// MCPTT info body classifying the terminating leg (TS 24.379 clause
+	// 15.1.4, mcpttinfo schema in Annex F.1): "prearranged" for group-document
+	// calls, "adhoc" for clause 17 legs (17.4.2.1.1).
 	callerURI := initiatorURI
 	if callerURI == "" {
 		callerURI = s.cfg.MCX.SIPIdentity
@@ -1260,11 +1269,11 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 			`<mcptt-Params>`+
 			`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
 			`<mcptt-calling-user-id><mcpttURI>%s</mcpttURI></mcptt-calling-user-id>`+
-			`<session-type>prearranged</session-type>`+
+			`<session-type>%s</session-type>`+
 			`<mcptt-calling-group-id><mcpttURI>%s</mcpttURI></mcptt-calling-group-id>`+
 			`</mcptt-Params>`+
 			`</mcpttinfo>`,
-		groupURI, callerURI, groupURI,
+		groupURI, callerURI, sessionType, groupURI,
 	)
 
 	const boundary = "mcxasboundary"

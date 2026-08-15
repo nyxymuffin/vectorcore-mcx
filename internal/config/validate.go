@@ -119,6 +119,11 @@ func (c Config) validateListeners() []error {
 				"sip.remote_groups[%d].transport: %q is not valid (want udp, tcp or tls)", i, rg.Transport))
 		}
 	}
+	if c.SIP.Adhoc.MaxParticipants < 0 {
+		problems = append(problems, fmt.Errorf(
+			"sip.adhoc.max_participants: %d is not valid (want 0 for no limit, or a positive count)",
+			c.SIP.Adhoc.MaxParticipants))
+	}
 	if strings.TrimSpace(c.SIP.TLSListen) != "" {
 		if err := validateListenAddr("sip.tls_listen", c.SIP.TLSListen); err != nil {
 			problems = append(problems, err)
