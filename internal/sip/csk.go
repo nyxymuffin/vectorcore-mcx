@@ -95,9 +95,16 @@ func (s *Server) initKeyManagement() {
 	if !s.cfg.KMS.Enabled {
 		return
 	}
-	identity := strings.TrimSpace(s.cfg.MCX.SIPIdentity)
+	// TS 24.379 clause 4.8: the CSK is protected to the public service
+	// identity of the participating function serving the user, which a
+	// deployment may expose under a different URI from the server's own
+	// SIP identity.
+	identity := strings.TrimSpace(s.cfg.KMS.ServerKeyIdentity)
 	if identity == "" {
-		slog.Warn("CSK upload disabled: the MCX server has no SIP identity to be addressed by")
+		identity = strings.TrimSpace(s.cfg.MCX.SIPIdentity)
+	}
+	if identity == "" {
+		slog.Warn("CSK upload disabled: the MCX server has no identity to be addressed by")
 		return
 	}
 
