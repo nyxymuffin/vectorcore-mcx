@@ -16,6 +16,7 @@ import (
 	"github.com/svinson1121/vectorcore-mcx/internal/api"
 	"github.com/svinson1121/vectorcore-mcx/internal/cms"
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
+	"github.com/svinson1121/vectorcore-mcx/internal/kms"
 	"github.com/svinson1121/vectorcore-mcx/internal/media"
 	sipserver "github.com/svinson1121/vectorcore-mcx/internal/sip"
 	"github.com/svinson1121/vectorcore-mcx/internal/store/sqlite"
@@ -71,6 +72,18 @@ func main() {
 	// CMS/GMS push to SIP subscribers.
 	cmsSrv.SetOnDocumentChange(sipSrv.NotifyXCAPChange)
 	go func() { errCh <- cmsSrv.Start(ctx) }()
+	if cfg.KMS.Enabled {
+		// TS 33.180 clause 5.3: the Key Management Server provisions
+		// identity-based key material. Its domain master secrets are
+		// loaded (or generated) at start so a misconfigured key material
+		// file fails here rather than on the first client request.
+		kmsSrv, err := kms.NewServer(cfg)
+		if err != nil {
+			slog.Error("start KMS", "err", err)
+			os.Exit(1)
+		}
+		go func() { errCh <- kmsSrv.Start(ctx) }()
+	}
 	go func() { errCh <- media.NewObserver(cfg, st).Start(ctx) }()
 	go func() { errCh <- sipSrv.ListenUDP(ctx) }()
 	go func() { errCh <- sipSrv.ListenTCP(ctx) }()

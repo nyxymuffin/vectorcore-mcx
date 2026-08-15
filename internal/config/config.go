@@ -20,6 +20,7 @@ type Config struct {
 	IMS      IMSConfig      `yaml:"ims"`
 	MCX      MCXConfig      `yaml:"mcx"`
 	IDMS     IDMSConfig     `yaml:"idms"`
+	KMS      KMSConfig      `yaml:"kms"`
 	TLS      TLSConfig      `yaml:"tls"`
 
 	// UsedDefaults reports that the file named on the command line did not
@@ -176,6 +177,43 @@ type CMSConfig struct {
 	// so the unauthenticated bootstrap fetch of ue-init-config keeps working
 	// in development; production deployments should enable it.
 	RequireAuthorization bool `yaml:"require_authorization"`
+}
+
+// KMSConfig configures the Key Management Server of TS 33.180 clause 5.3
+// and its provisioning interface of Annex D.
+type KMSConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	// KMSURI identifies the security domain. It is hashed into every
+	// MIKEY-SAKKE UID (TS 33.180 clause F.2.1), so changing it
+	// invalidates all key material this KMS has issued.
+	KMSURI string `yaml:"kms_uri"`
+	// CertURI names the root certificate. Clause 5.3.5: a client
+	// replaces a held certificate when it receives one bearing the same
+	// CertUri, which is how a certificate is updated in place.
+	CertURI string `yaml:"cert_uri"`
+	Issuer  string `yaml:"issuer"`
+	// KMSID is the optional KmsId of table D.3.1-1, identifying the
+	// provider of the response.
+	KMSID string `yaml:"kms_id"`
+	// KeyMaterialFile holds the domain master secrets. It is deliberately
+	// a separate file rather than fields here: these secrets derive every
+	// user key in the domain and must never reach a configuration
+	// repository. The file is created with owner-only permissions on
+	// first start and refused if it is readable more widely.
+	KeyMaterialFile string `yaml:"key_material_file"`
+	// KeyPeriodSeconds and KeyPeriodOffsetSeconds are the UserKeyPeriod
+	// and UserKeyOffset of table D.3.2.2-1, the segmentation of time into
+	// key periods. The default is the 2592000 seconds (four weeks) the
+	// specification uses in its own examples.
+	KeyPeriodSeconds       int64 `yaml:"key_period_seconds"`
+	KeyPeriodOffsetSeconds int64 `yaml:"key_period_offset_seconds"`
+	// DomainList is the optional KmsDomainList of the certificate.
+	DomainList []string `yaml:"domain_list"`
+	// ServerIdentities are the identities a client may request key
+	// material for besides its own, which is how the group management
+	// server identity of clause 5.7.1 gets provisioned.
+	ServerIdentities []string `yaml:"server_identities"`
 }
 
 type MediaConfig struct {
@@ -394,6 +432,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.CMS.Listen == "" {
 		c.CMS.Listen = ":8100"
+	}
+	if c.KMS.Listen == "" {
+		c.KMS.Listen = ":8110"
+	}
+	if c.KMS.KMSURI == "" {
+		c.KMS.KMSURI = "kms." + c.IMS.Realm
+	}
+	if c.KMS.CertURI == "" {
+		c.KMS.CertURI = "cert1." + c.KMS.KMSURI
+	}
+	if c.KMS.KeyMaterialFile == "" {
+		c.KMS.KeyMaterialFile = "kms-domain-keys.txt"
+	}
+	if c.KMS.KeyPeriodSeconds == 0 {
+		c.KMS.KeyPeriodSeconds = 2592000
 	}
 	if c.CMS.XCAPRoot == "" {
 		c.CMS.XCAPRoot = c.httpScheme() + "://" + net.JoinHostPort(c.SIP.AdvertiseHost, listenPort(c.CMS.Listen, "8100")) + "/xcap-root"
