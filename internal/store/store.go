@@ -17,6 +17,16 @@ type User struct {
 	// FunctionalAliasList of the user profile). An empty list authorises
 	// nothing.
 	FunctionalAliases []string `json:"functional_aliases,omitempty"`
+	// MCID is the login identifier the user authenticates to the IdMS with
+	// (TS 33.180 clause 5.1.2.1: the MC ID, mapped to the MC service IDs;
+	// may equal the MCPTT ID and defaults to it when empty).
+	MCID string `json:"mc_id,omitempty"`
+	// Password is a write-only transient: when set on create/update, the
+	// store hashes it into PasswordHash and never returns it.
+	Password string `json:"password,omitempty"`
+	// PasswordHash is the PBKDF2-SHA256 verifier for IdMS authentication;
+	// never serialised.
+	PasswordHash string `json:"-"`
 	// AllowEmergencyCall is the user profile's <allow-emergency-group-call> /
 	// <allow-emergency-private-call> ruleset stand-in (TS 24.379 clause
 	// 6.3.3.1.13.2): whether this user may initiate MCPTT emergency calls.

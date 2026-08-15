@@ -353,6 +353,8 @@ FROM affiliations;
 		`ALTER TABLE users ADD COLUMN allow_emergency_call INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE mcptt_calls ADD COLUMN session_expires_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE groups ADD COLUMN max_duration_seconds INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN mc_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''`,
 		`UPDATE group_memberships SET role = 'MCPTT User' WHERE LOWER(TRIM(role)) IN ('', 'member', 'user')`,
 		`UPDATE group_memberships SET role = 'MCPTT Administrator' WHERE LOWER(TRIM(role)) IN ('admin', 'administrator')`,
 		`UPDATE group_memberships SET role = 'MCPTT Dispatcher' WHERE LOWER(TRIM(role)) = 'dispatcher'`,
@@ -604,7 +606,7 @@ func notFound(err error) (bool, error) {
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]store.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, allow_emergency_call, created_at, updated_at FROM users ORDER BY display_name, mcptt_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, allow_emergency_call, mc_id, password_hash, created_at, updated_at FROM users ORDER BY display_name, mcptt_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -614,7 +616,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]store.User, error) {
 		var v store.User
 		var enabled, allowEmergency int
 		var aliases, created, updated string
-		if err := rows.Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &aliases, &allowEmergency, &created, &updated); err != nil {
+		if err := rows.Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &aliases, &allowEmergency, &v.MCID, &v.PasswordHash, &created, &updated); err != nil {
 			return nil, err
 		}
 		v.Enabled = scanBool(enabled)
@@ -631,8 +633,8 @@ func (s *Store) GetUser(ctx context.Context, id string) (*store.User, error) {
 	var v store.User
 	var enabled, allowEmergency int
 	var aliases, created, updated string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, allow_emergency_call, created_at, updated_at FROM users WHERE id = ?`), id).
-		Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &aliases, &allowEmergency, &created, &updated)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, allow_emergency_call, mc_id, password_hash, created_at, updated_at FROM users WHERE id = ?`), id).
+		Scan(&v.ID, &v.IMPI, &v.IMPU, &v.MCPTTID, &v.DisplayName, &enabled, &aliases, &allowEmergency, &v.MCID, &v.PasswordHash, &created, &updated)
 	if ok, err := notFound(err); ok || err != nil {
 		return nil, err
 	}
@@ -684,8 +686,9 @@ FROM functional_aliases WHERE mcptt_id = ? ORDER BY alias_uri`), mcpttID)
 
 func (s *Store) CreateUser(ctx context.Context, v store.User) (store.User, error) {
 	v.ID, v.CreatedAt, v.UpdatedAt = stampNew(v.ID)
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO users (id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, allow_emergency_call, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		v.ID, v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), marshalStrings(v.FunctionalAliases), boolInt(v.AllowEmergencyCall), formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
+	applyPassword(&v)
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO users (id, impi, impu, mcptt_id, display_name, enabled, functional_aliases, allow_emergency_call, mc_id, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		v.ID, v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), marshalStrings(v.FunctionalAliases), boolInt(v.AllowEmergencyCall), v.MCID, v.PasswordHash, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
 
@@ -697,9 +700,27 @@ func (s *Store) UpdateUser(ctx context.Context, id string, v store.User) (*store
 	v.ID = id
 	v.CreatedAt = current.CreatedAt
 	v.UpdatedAt = time.Now().UTC()
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE users SET impi=?, impu=?, mcptt_id=?, display_name=?, enabled=?, functional_aliases=?, allow_emergency_call=?, updated_at=? WHERE id=?`),
-		v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), marshalStrings(v.FunctionalAliases), boolInt(v.AllowEmergencyCall), formatTime(v.UpdatedAt), id)
+	if v.Password != "" {
+		applyPassword(&v)
+	} else {
+		v.PasswordHash = current.PasswordHash
+	}
+	if strings.TrimSpace(v.MCID) == "" {
+		v.MCID = current.MCID
+	}
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE users SET impi=?, impu=?, mcptt_id=?, display_name=?, enabled=?, functional_aliases=?, allow_emergency_call=?, mc_id=?, password_hash=?, updated_at=? WHERE id=?`),
+		v.IMPI, v.IMPU, v.MCPTTID, v.DisplayName, boolInt(v.Enabled), marshalStrings(v.FunctionalAliases), boolInt(v.AllowEmergencyCall), v.MCID, v.PasswordHash, formatTime(v.UpdatedAt), id)
 	return &v, err
+}
+
+// applyPassword hashes the transient Password into PasswordHash
+// (PBKDF2-SHA256, per-user salt) and clears the plaintext.
+func applyPassword(v *store.User) {
+	if v.Password == "" {
+		return
+	}
+	v.PasswordHash = store.HashPassword(v.Password)
+	v.Password = ""
 }
 
 func (s *Store) DeleteUser(ctx context.Context, id string) error {

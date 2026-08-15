@@ -171,11 +171,22 @@ idms:
   # Value placed in the "iss" claim. Defaults to vectorcore-mcx-idms.
   issuer: ""
 
-  # Redirect URIs the shim will send an authorization code to. Required when
-  # the shim is enabled, and matched exactly: TS 33.180 Annex B.3 requires
-  # clients and their redirect URIs to be pre-registered, and an unrestricted
-  # redirect_uri is an open redirect that leaks the code.
+  # Redirect URIs an authorization code may be sent to. Required for both the
+  # shim and the conformant IdMS, matched exactly: TS 33.180 Annex B.3
+  # requires clients and their redirect URIs to be pre-registered, and an
+  # unrestricted redirect_uri is an open redirect that leaks the code.
   allowed_redirect_uris: []
+
+  # The conformant IdMS (TS 33.180 Annex B / TS 24.482): authorization code
+  # flow with mandatory PKCE (S256), password authentication of provisioned
+  # users (set mc_id and password on the user via the management API), the MC
+  # service scopes, and rotating refresh tokens. Mutually exclusive with the
+  # development shim; requires at least one registered client id.
+  enabled: false
+  allowed_client_ids: []
+  # Token lifetimes; defaults 3600 s (access) and 30 days (refresh).
+  access_token_ttl_seconds: 0
+  refresh_token_ttl_seconds: 0
 
 tls:
   # TLS for the two HTTP listeners (OAM API on api.listen, CMS/XCAP on

@@ -25,11 +25,12 @@ type Server struct {
 	version    string
 	startAt    time.Time
 	idmsSigner *idmsSigner
+	oidc       *oidcState
 }
 
 func New(st store.Store, cfg config.Config, version string) *Server {
-	s := &Server{st: st, cfg: cfg, version: version, startAt: time.Now()}
-	if cfg.IDMS.DevelopmentShimEnabled {
+	s := &Server{st: st, cfg: cfg, version: version, startAt: time.Now(), oidc: newOIDCState()}
+	if cfg.IDMS.DevelopmentShimEnabled || cfg.IDMS.Enabled {
 		signer, err := newIDMSSigner(cfg.IDMS.SigningKeyFile)
 		if err != nil {
 			// The shim was asked for but cannot sign. Leaving the signer nil
@@ -65,10 +66,14 @@ func (s *Server) Handler() http.Handler {
 	registerCalls(api, s.st)
 	registerDialogs(api, s.st)
 
-	// The development identity shim authenticates nobody, so it is registered
-	// only when explicitly enabled. When disabled its paths do not exist at
+	// The conformant IdMS (TS 33.180 Annex B) takes precedence; the
+	// development shim - which authenticates nobody - registers only when it
+	// alone is enabled. When neither is enabled the paths do not exist at
 	// all rather than returning an error, so there is nothing to probe.
-	if s.cfg.IDMS.DevelopmentShimEnabled {
+	switch {
+	case s.cfg.IDMS.Enabled:
+		registerIDMSOIDC(mux, s)
+	case s.cfg.IDMS.DevelopmentShimEnabled:
 		slog.Warn("IDMS development shim enabled: it performs NO user authentication and must not be reachable from an untrusted network")
 		registerIDMSShim(mux, s)
 	}

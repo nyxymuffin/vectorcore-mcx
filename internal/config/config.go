@@ -201,6 +201,19 @@ type IDMSConfig struct {
 	SigningKeyFile         string   `yaml:"signing_key_file"`
 	Issuer                 string   `yaml:"issuer"`
 	AllowedRedirectURIs    []string `yaml:"allowed_redirect_uris"`
+	// Enabled turns on the conformant OpenID Connect provider of TS 33.180
+	// Annex B / TS 24.482: authorization code flow with mandatory PKCE
+	// (S256), password authentication of provisioned users (3gpp:acr:password),
+	// MC service scopes, and refresh tokens. Mutually exclusive with the
+	// development shim.
+	Enabled bool `yaml:"enabled"`
+	// AllowedClientIDs is the client registration list (TS 33.180 clause
+	// B.3); empty permits no client.
+	AllowedClientIDs []string `yaml:"allowed_client_ids"`
+	// AccessTokenTTLSeconds bounds issued access tokens (default 3600).
+	AccessTokenTTLSeconds int `yaml:"access_token_ttl_seconds"`
+	// RefreshTokenTTLSeconds bounds refresh tokens (default 30 days).
+	RefreshTokenTTLSeconds int `yaml:"refresh_token_ttl_seconds"`
 }
 
 type IMSConfig struct {

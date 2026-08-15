@@ -134,6 +134,14 @@ func (c Config) validateListeners() []error {
 			"media.floor_t1_seconds: %d is not valid (want a positive duration, or -1 to disable)",
 			c.Media.FloorT1Seconds))
 	}
+	if c.IDMS.Enabled && c.IDMS.DevelopmentShimEnabled {
+		problems = append(problems, errors.New(
+			"idms: enabled and development_shim_enabled are mutually exclusive (the shim authenticates nobody)"))
+	}
+	if c.IDMS.Enabled && len(c.IDMS.AllowedClientIDs) == 0 {
+		problems = append(problems, errors.New(
+			"idms.allowed_client_ids: the conformant IdMS requires at least one registered client (TS 33.180 clause B.3)"))
+	}
 	if c.SIP.Emergency.GroupTimeLimitSeconds < 0 {
 		problems = append(problems, fmt.Errorf(
 			"sip.emergency.group_time_limit_seconds: %d is not valid (want 0 to disable TNG2, or a positive duration)",
