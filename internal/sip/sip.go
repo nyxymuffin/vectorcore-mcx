@@ -795,8 +795,13 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	case "private":
 		// TS 24.379 clause 11.1.1: private call - the callee comes from the
 		// resource-lists body and is actually invited before the caller's
-		// final response. (First-to-answer stays on the legacy path.)
+		// final response.
 		s.handlePrivateInvite(ctx, send, msg, source, transport)
+		return
+	case "first-to-answer":
+		// TS 24.379 clause 11.1.1: parallel candidate legs, first 200 wins,
+		// losers released with "not selected for call".
+		s.handleFirstToAnswerInvite(ctx, send, msg, source, transport)
 		return
 	}
 	// Originating participating function, TS 24.379 clause 10.1.1.3.1.1
@@ -1323,11 +1328,12 @@ func (s *Server) sendGroupCallNotifications(ctx context.Context, txCallID, group
 	}
 }
 
-// sendRXInvite builds and sends a terminating leg toward a member. done, when
-// non-nil, receives the leg outcome (established or not) — the private call
-// flow answers its originator only after the callee answers (TS 24.379 clause
-// 11.1.1.4.2), unlike the group flow which only orders invites before its 200.
-func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload, sessionType string, reg store.Registration, mode answerMode, done chan bool) {
+// sendRXInvite builds and sends a terminating leg toward a member, returning
+// the leg's Call-ID. done, when non-nil, receives the leg outcome
+// (established or not) — the private and first-to-answer call flows answer
+// their originator only after a callee answers (TS 24.379 clause 11.1.1.4.2),
+// unlike the group flow which only orders invites before its 200.
+func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiatorURI, memberImpu, audioPayload, sessionType string, reg store.Registration, mode answerMode, done chan bool) string {
 	// Call-ID is token-only (no @host) to save ~18 bytes — RFC 3261 allows bare tokens.
 	callID := newToken()
 	localTag := newToken()
@@ -1374,18 +1380,19 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		callerURI = s.cfg.MCX.SIPIdentity
 	}
 	var mcpttInfoBody string
-	if sessionType == "private" {
+	if sessionType == "private" || sessionType == "first-to-answer" {
 		// Clause 11.1.1.4.1 step 4: the <mcptt-request-uri> carries the
-		// invited user's MCPTT ID; a private call has no calling group.
+		// invited user's MCPTT ID; private and first-to-answer calls have no
+		// calling group.
 		mcpttInfoBody = fmt.Sprintf(
 			`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">`+
 				`<mcptt-Params>`+
 				`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
 				`<mcptt-calling-user-id><mcpttURI>%s</mcpttURI></mcptt-calling-user-id>`+
-				`<session-type>private</session-type>`+
+				`<session-type>%s</session-type>`+
 				`</mcptt-Params>`+
 				`</mcpttinfo>`,
-			memberImpu, callerURI,
+			memberImpu, callerURI, sessionType,
 		)
 	} else {
 		mcpttInfoBody = fmt.Sprintf(
@@ -1426,7 +1433,10 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	}
 	if target == "" {
 		slog.Warn("RX INVITE: no route to member", "member", memberImpu)
-		return
+		if done != nil {
+			done <- false
+		}
+		return ""
 	}
 
 	// Route the terminating INVITE through S-CSCF's standard MT path per
@@ -1470,11 +1480,18 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	// local policy for the automatic case (clause 6.3.2.2.5.2 step 8A), and
 	// this server's policy is to assert it so the client commences without
 	// user interaction, which is what its own setting asked for.
-	switch mode {
-	case answerModeAutomatic:
-		hdrs = append(hdrs, header{"Answer-Mode", "Auto"})
-	case answerModeManual:
-		hdrs = append(hdrs, header{"Answer-Mode", "Manual"})
+	if sessionType == "first-to-answer" {
+		// Clause 11.1.1.4.1 step 3: a first-to-answer leg carries
+		// Priv-Answer-Mode: Manual (RFC 5373) - the callee must answer
+		// deliberately for the race to mean anything.
+		hdrs = append(hdrs, header{"Priv-Answer-Mode", "Manual"})
+	} else {
+		switch mode {
+		case answerModeAutomatic:
+			hdrs = append(hdrs, header{"Answer-Mode", "Auto"})
+		case answerModeManual:
+			hdrs = append(hdrs, header{"Answer-Mode", "Manual"})
+		}
 	}
 	// Clause 6.3.3.1.19: requests generated while the group is in an
 	// in-progress emergency or imminent peril state carry the corresponding
@@ -1511,6 +1528,7 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 		audioPort: audioPort, rtcpPort: rtcpPort, sdpBody: sdpBody,
 		done: done, answerTimeout: answerTimeout,
 	})
+	return callID
 }
 
 // rxLegContext carries what the asynchronous half of an RX leg needs from the
@@ -1687,6 +1705,13 @@ func (s *Server) terminateRXLegs(ctx context.Context, groupURI, txCallID string)
 }
 
 func (s *Server) sendRXBYE(ctx context.Context, call store.MCPTTCall) {
+	s.sendRXBYEWithReason(ctx, call, "")
+}
+
+// sendRXBYEWithReason releases an AS-initiated leg; a non-empty reason is
+// carried as the <release-reason> of an mcptt-info body (TS 24.379 clause
+// 11.1.1.4.2 step 8 a: "not selected for call" for first-to-answer losers).
+func (s *Server) sendRXBYEWithReason(ctx context.Context, call store.MCPTTCall, reason string) {
 	transport := call.Transport
 	if transport == "" {
 		transport = "udp"
@@ -1726,8 +1751,16 @@ func (s *Server) sendRXBYE(ctx context.Context, call store.MCPTTCall) {
 			hdrs = append(hdrs, header{"Route", r})
 		}
 	}
-	bye := buildRequest("BYE", byeReqURI, hdrs, nil)
-	slog.Info("RX BYE sending", "call_id", call.CallID, "member", call.TargetURI, "group_uri", call.GroupURI)
+	var body []byte
+	if reason != "" {
+		body = []byte(fmt.Sprintf(
+			`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params>`+
+				`<release-reason>%s</release-reason>`+
+				`</mcptt-Params></mcpttinfo>`, reason))
+		hdrs = append(hdrs, header{"Content-Type", "application/vnd.3gpp.mcptt-info+xml"})
+	}
+	bye := buildRequest("BYE", byeReqURI, hdrs, body)
+	slog.Info("RX BYE sending", "call_id", call.CallID, "member", call.TargetURI, "group_uri", call.GroupURI, "reason", reason)
 	s.sendTransacted(ctx, transport, target, branch, "BYE", []byte(bye))
 	if err := s.st.UpdateCallState(ctx, call.CallID, "terminated"); err != nil {
 		slog.Warn("RX BYE state update failed", "call_id", call.CallID, "err", err)
