@@ -41,6 +41,7 @@ type Server struct {
 	confSubs           *conferenceSubs
 	regroups           *regroupState
 	sdsCorrelation     *sdsCorrelator
+	rxLegCancel        sync.Map // leg callID → *rxCancelState, in-flight RX INVITEs that can be cancelled
 	pesSessions        sync.Map // callID → *pesSession, established pre-established sessions (TS 24.379 §8)
 	remoteInvites      sync.Map // original callID → *remoteInviteState, in-flight relayed INVITEs (CANCEL relay)
 	locationRequests   sync.Map // lower(target IMPU) → requester IMPU, pending on-demand location fetches (TS 24.379 §13.2.3.2)
@@ -1735,6 +1736,18 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	}
 	inviteMsg := buildRequest("INVITE", memberImpu, hdrs, []byte(multipartBody))
 
+	// Registered before the send so a first-to-answer loser can be cancelled
+	// while it is still ringing (clause 11.1.1.4.2 step 8 b).
+	s.rxLegCancel.Store(callID, &rxCancelState{
+		branch:     branch,
+		target:     target,
+		transport:  transport,
+		requestURI: memberImpu,
+		fromHeader: fmt.Sprintf("<%s>;tag=%s", s.cfg.MCX.SIPIdentity, localTag),
+		toHeader:   fmt.Sprintf("<%s>", memberImpu),
+		callID:     callID,
+	})
+
 	slog.Info("RX INVITE sending", "call_id", callID, "member", memberImpu, "target", target, "group_uri", groupURI, "tx_call_id", txCallID)
 	// Transacted send: Timer A retransmission over UDP, Timer B timeout, and
 	// the transaction layer ACKs a non-2xx final (RFC 3261 17.1.1.3). The
@@ -1782,6 +1795,7 @@ func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegC
 	audioPort, rtcpPort, sdpBody := leg.audioPort, leg.rtcpPort, leg.sdpBody
 	_ = initiatorURI
 	defer s.pendingInvites.Delete(callID)
+	defer s.rxLegCancel.Delete(callID)
 	established := false
 	if leg.done != nil {
 		defer func() {

@@ -281,3 +281,52 @@ func TestFirstToAnswerWithoutCandidatesGets403With145(t *testing.T) {
 		t.Fatalf("403 lacks warning 145:\n%s", responses[0])
 	}
 }
+
+// A still-ringing loser is CANCELled rather than left to time out
+// (clause 11.1.1.4.2 step 8 b).
+func TestFirstToAnswerCancelsRingingLoser(t *testing.T) {
+	s, st := privateFixture(t)
+
+	quick := newFTACandidate(t, s, st, "sip:quick@example.test", true)
+	_ = quick
+	// This candidate never answers: it must receive a CANCEL.
+	silent := newFTACandidate(t, s, st, "sip:silent@example.test", false)
+
+	responses := collectResponses(t, s,
+		ftaInvite("fta-cancel", []string{"sip:quick@example.test", "sip:silent@example.test"}))
+	if len(responses) != 3 || !strings.HasPrefix(responses[2], "SIP/2.0 200") {
+		t.Fatalf("responses = %v, want 100/180/200", responses)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var cancel string
+		for _, m := range silent.messages() {
+			if strings.HasPrefix(m, "CANCEL ") {
+				cancel = m
+			}
+		}
+		if cancel != "" {
+			// RFC 3261 clause 9.1: the CANCEL mirrors the INVITE's branch.
+			var invite string
+			for _, m := range silent.messages() {
+				if strings.HasPrefix(m, "INVITE ") {
+					invite = m
+				}
+			}
+			if headerLine(invite, "Via") != headerLine(cancel, "Via") {
+				t.Fatalf("CANCEL Via %q does not mirror the INVITE Via %q",
+					headerLine(cancel, "Via"), headerLine(invite, "Via"))
+			}
+			if headerLine(invite, "Call-ID") != headerLine(cancel, "Call-ID") {
+				t.Fatal("CANCEL Call-ID does not match the leg")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ringing loser never cancelled; messages:\n%s",
+				strings.Join(silent.messages(), "\n---\n"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

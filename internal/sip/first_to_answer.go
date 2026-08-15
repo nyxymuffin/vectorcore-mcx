@@ -250,9 +250,46 @@ func (s *Server) handleFirstToAnswerInvite(ctx context.Context, send responder, 
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, []byte(multipart))
 }
 
+// rxCancelState is what a CANCEL toward an in-flight RX INVITE needs
+// (RFC 3261 clause 9.1: same branch, From, To, Call-ID; CSeq method CANCEL).
+type rxCancelState struct {
+	branch     string
+	target     string
+	transport  string
+	requestURI string
+	fromHeader string
+	toHeader   string
+	callID     string
+}
+
+// cancelRXLeg cancels a still-ringing RX INVITE. Reports whether there was
+// one to cancel.
+func (s *Server) cancelRXLeg(legCallID, reason string) bool {
+	v, ok := s.rxLegCancel.Load(legCallID)
+	if !ok {
+		return false
+	}
+	st := v.(*rxCancelState)
+	hdrs := []header{
+		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(st.transport), advertiseHost(s.cfg), st.branch)},
+		{"Max-Forwards", "70"},
+		{"From", st.fromHeader},
+		{"To", st.toHeader},
+		{"Call-ID", st.callID},
+		{"CSeq", "1 CANCEL"},
+	}
+	cancel := buildRequest("CANCEL", st.requestURI, hdrs, nil)
+	slog.Info("cancelling RX leg", "call_id", legCallID, "target", st.target, "reason", reason)
+	if err := s.sendOutbound(context.Background(), st.transport, st.target, []byte(cancel)); err != nil {
+		slog.Warn("RX leg CANCEL send failed", "call_id", legCallID, "err", err)
+	}
+	return true
+}
+
 // releaseFTALosers sends the "not selected for call" BYE to every candidate
 // other than the winner whose leg established - both those already up when
-// the winner answered and those whose late answers arrive afterwards.
+// the winner answered and those whose late answers arrive afterwards - and
+// CANCELs those still ringing (clause 11.1.1.4.2 step 8 b).
 func (s *Server) releaseFTALosers(candidates []*ftaCandidate, winner *ftaCandidate, pending int, outcomes chan ftaOutcome) {
 	ctx := context.Background()
 	release := func(c *ftaCandidate) {
@@ -265,9 +302,15 @@ func (s *Server) releaseFTALosers(candidates []*ftaCandidate, winner *ftaCandida
 		}
 		s.sendRXBYEWithReason(ctx, *call, "not selected for call")
 	}
-	// Legs already established before the winner.
+	// Legs already established before the winner get the BYE; those still
+	// ringing are cancelled (step 8 b). A late answer to a cancelled leg is
+	// still covered by the outcome loop below, which is the step 8 d
+	// fallback.
 	for _, c := range candidates {
-		if c != winner {
+		if c == winner {
+			continue
+		}
+		if !s.cancelRXLeg(c.legCallID, "not selected for call") {
 			release(c)
 		}
 	}
