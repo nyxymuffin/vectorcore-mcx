@@ -168,3 +168,29 @@ KMS requests and responses (clause D.2.2), KMS Lookup and Redirect
 RFC 6508 clause 3.2, which the KMS itself does not need but an MCX Server
 does, because CSK upload requires the server to decrypt a SAKKE payload
 addressed to its own MDSI identity.
+
+## G. Second open question: MIKEY SIGN payload length (TS 33.180 E.1.2)
+
+Clause E.1.2 says of every MIKEY-SAKKE message: "The signature (S type)
+field shall be of type '2' (ECCSI) and the Signature length field shall be
+'32', indicating a signature length of 32 bytes (i.e. 256 bits)."
+
+S type 2 is the ECCSI signature of IETF RFC 6507, and RFC 6507 clause 3.3
+fixes an ECCSI Signature at r || s || PVT = 4N+1 octets, which for the
+P-256 profile that RFC 6509 clause 2.1.1 mandates is 129 octets. The r and
+s components alone are 64. A 32-octet field cannot carry the signature the
+same sentence calls for.
+
+Unlike the TrK question in section F there is only one self-consistent
+reading, so the implementation writes 129 and the rest of the message
+follows the referenced RFCs. Worth confirming against a real MCX
+implementation before interop testing, because a peer that took the
+sentence literally would emit something no one can verify.
+
+Also deferred in the MIKEY layer: crypto session maps (CS# greater than 0
+with the GENERIC-ID map of RFC 6043 clause 6.1.1) - the default security
+profiles of Annexes E.2.2, E.3.2 and E.4.2 use the empty map, which is
+what is implemented; the Security Properties payload is parsed past rather
+than interpreted. The SAKKE-to-self extension (Annex E.5), the key
+parameter payload (Annex E.6) and identity hiding (Annex E.7) are not
+implemented.
