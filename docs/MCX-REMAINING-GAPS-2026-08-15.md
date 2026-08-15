@@ -105,12 +105,25 @@ authorisation and size limits (warnings 208/217/218), functional-alias
 targets with SIP 300, media-plane SDS (9.2.3), file distribution (FD),
 enhanced status, conversation management.
 
-## E. Security, TS 33.180 — remaining
+## E. Security, TS 33.180 - status
 
-KMS and key management (CSK/GMK/PCK distribution via MIKEY-SAKKE), SRTP/SRTCP
-media protection, signalling-plane XML confidentiality/integrity protection,
-GKTP as above, HTTP-1 bearer authorisation (listed under CMS). Access-token
-validation for service authorisation is done.
+Done: the Key Management Server of clause 5.3 with its Annex D
+provisioning interface (init, keyprov, certcache, cert), ECCSI and SAKKE
+key extraction and the MIKEY-SAKKE UID derivation of Annex F.2.1, the
+SAKKE pairing and key exchange of RFC 6508 clause 6.2, ECCSI signatures
+of RFC 6507 clause 5.2, the MIKEY-SAKKE I_MESSAGE format of Annex E, and
+the CSK upload of clauses 5.4 and 9.2.1.3. Access token validation for
+service authorisation and the inter-domain authorisation of Annex B.7 are
+done. Every published test vector of RFC 6507, RFC 6508 and clause F.2.1.2
+is pinned by tests.
+
+Remaining: the application-layer protection the CSK exists to key
+(clause 9.3: XML content confidentiality and integrity, SRTCP), the key
+download procedure of clause 5.8 by which the server replaces a CSK,
+MuSiK distribution (clause 9.2.2), GMK distribution from the group
+management server (clause 5.7) and PCK distribution for private calls
+(clause 5.6), SRTP media protection with the default profiles of
+Annexes E.2.2, E.3.2 and E.4.2, and the items in sections F and G below.
 
 ## Scope decisions (Nyx, 2026-08-15)
 
