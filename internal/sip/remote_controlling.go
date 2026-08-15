@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
 )
@@ -34,6 +35,19 @@ func (r remoteControlling) AdmitOriginatingCall(context.Context, originatingGrou
 func (r remoteControlling) EstablishGroupLegs(originatingGroupCall) {}
 func (r remoteControlling) ReleaseGroupLegs(groupURI, callID string) {
 	r.s.relayRemoteBye(groupURI, callID)
+}
+
+// remoteInviteState is what an in-flight relayed INVITE needs for a CANCEL
+// toward the remote controlling function (RFC 3261 clause 9.1: the CANCEL
+// mirrors the INVITE's Via branch, From, To, Call-ID and CSeq number).
+type remoteInviteState struct {
+	branch      string
+	target      string
+	transport   string
+	fromHeader  string
+	toHeader    string
+	relayCallID string
+	cancelled   atomic.Bool
 }
 
 // remoteSessionState is what a relayed session needs for later in-dialog
@@ -125,8 +139,20 @@ func (s *Server) relayToRemoteControlling(ctx context.Context, send responder, m
 		"call_id", call.CallID, "relay_call_id", relayCallID, "group_uri", call.GroupURI,
 		"psi", rc.cfg.ControllingPSI, "target", target, "transport", remoteTransport)
 
+	// Registered before the send so a CANCEL arriving while the relayed
+	// INVITE rings can be relayed too (clause 6.3.2.1.4 territory).
+	s.remoteInvites.Store(call.CallID, &remoteInviteState{
+		branch: branch, target: target, transport: remoteTransport,
+		fromHeader:  fmt.Sprintf("<%s>;tag=%s", s.cfg.MCX.SIPIdentity, fromTag),
+		toHeader:    fmt.Sprintf("<%s>", rc.cfg.ControllingPSI),
+		relayCallID: relayCallID,
+	})
 	final := s.sendTransacted(ctx, remoteTransport, target, branch, "INVITE", []byte(invite))
 	resp := <-final
+	cancelled := false
+	if v, ok := s.remoteInvites.LoadAndDelete(call.CallID); ok {
+		cancelled = v.(*remoteInviteState).cancelled.Load()
+	}
 
 	if resp == nil {
 		// Timer B expired or the send failed; nothing came back to relay.
@@ -171,6 +197,16 @@ func (s *Server) relayToRemoteControlling(ctx context.Context, send responder, m
 		cfg: rc.cfg, remoteContact: remoteContact, remoteTag: remoteTag,
 		localFromTag: fromTag, callID: relayCallID, routeSet: routeSet,
 	})
+
+	if cancelled {
+		// RFC 3261 clause 9.1: the callee answered before the CANCEL took
+		// effect. The caller already got its 487, so the freshly created
+		// remote dialog is released immediately.
+		slog.Info("remote 200 raced the CANCEL; releasing the remote session",
+			"call_id", call.CallID, "relay_call_id", relayCallID)
+		s.relayRemoteBye(call.GroupURI, call.CallID)
+		return
+	}
 
 	answer := ""
 	ct := strings.ToLower(resp.Header("Content-Type"))
@@ -276,4 +312,34 @@ func (s *Server) remoteGroupFor(groupURI string) (config.RemoteGroupConfig, bool
 		}
 	}
 	return config.RemoteGroupConfig{}, false
+}
+
+// relayRemoteCancel forwards a caller's CANCEL toward the remote controlling
+// function while the relayed INVITE is still in flight (RFC 3261 clause 9.1:
+// same branch, Via, From, To, Call-ID; CSeq method CANCEL). Reports whether
+// there was an in-flight relay to cancel.
+func (s *Server) relayRemoteCancel(callID string) bool {
+	v, ok := s.remoteInvites.Load(callID)
+	if !ok {
+		return false
+	}
+	state := v.(*remoteInviteState)
+	state.cancelled.Store(true)
+	hdrs := []header{
+		{"Via", fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(state.transport), advertiseHost(s.cfg), state.branch)},
+		{"Max-Forwards", "70"},
+		{"From", state.fromHeader},
+		{"To", state.toHeader},
+		{"Call-ID", state.relayCallID},
+		{"CSeq", "1 CANCEL"},
+	}
+	// The CANCEL target PSI comes from the To header's URI.
+	reqURI := strings.Trim(strings.TrimSpace(strings.Split(state.toHeader, ">")[0]), "<")
+	cancel := buildRequest("CANCEL", reqURI, hdrs, nil)
+	slog.Info("relaying CANCEL to remote controlling function",
+		"call_id", callID, "relay_call_id", state.relayCallID, "target", state.target)
+	if err := s.sendOutbound(context.Background(), state.transport, state.target, []byte(cancel)); err != nil {
+		slog.Warn("remote CANCEL send failed", "call_id", callID, "err", err)
+	}
+	return true
 }

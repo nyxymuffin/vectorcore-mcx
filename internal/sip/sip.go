@@ -39,6 +39,7 @@ type Server struct {
 	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
 	emergencyAlerts    *alertState
 	confSubs           *conferenceSubs
+	remoteInvites      sync.Map // original callID → *remoteInviteState, in-flight relayed INVITEs (CANCEL relay)
 	locationRequests   sync.Map // lower(target IMPU) → requester IMPU, pending on-demand location fetches (TS 24.379 §13.2.3.2)
 	confVersion        atomic.Int64
 	inProgressPriority sync.Map // lower(groupURI) → "emergency" | "imminent" in-progress state (TS 24.379 §4.6)
@@ -1337,6 +1338,9 @@ func (s *Server) handleCANCEL(ctx context.Context, send responder, msg *Message,
 		inv := p.(*uasInviteState)
 		s.respondTagged(inv.send, inv.msg, 487, "Request Terminated", inv.tag, nil, nil)
 	}
+	// A relayed INVITE still in flight toward a remote controlling function
+	// is cancelled there too (RFC 3261 clause 9.1; TS 24.379 relay posture).
+	s.relayRemoteCancel(callID)
 }
 
 func (s *Server) handleInDialogRequest(ctx context.Context, send responder, msg *Message, source, transport string) {

@@ -289,3 +289,63 @@ func TestRemoteGroupWithoutTargetGets404With142(t *testing.T) {
 		t.Fatalf("404 lacks warning 142:\n%s", last)
 	}
 }
+
+// A CANCEL while the relayed INVITE rings is forwarded to the remote
+// controlling function with the INVITE's branch and dialog identifiers
+// (RFC 3261 clause 9.1), and the caller gets its 487.
+func TestCancelRelayedToRemoteControlling(t *testing.T) {
+	remote := newFakeRemote(t)
+	s, _ := remoteGroupFixture(t, remote.addr())
+
+	inviteRaw := remoteGroupInvite("rc-cancel-1")
+	go func() {
+		s.handleRaw(context.Background(), "192.0.2.52:5060", "udp", []byte(inviteRaw), func(b []byte) error {
+			return nil
+		})
+	}()
+
+	// The relayed INVITE reaches the remote; it rings without answering.
+	relayed := remote.receive(t)
+	if !strings.HasPrefix(relayed.StartLine, "INVITE ") {
+		t.Fatalf("expected relayed INVITE, got %q", relayed.StartLine)
+	}
+
+	cancel := "CANCEL sip:remote_group@partner.example SIP/2.0\r\n" +
+		"Via: SIP/2.0/UDP 192.0.2.52:5060;branch=z9hG4bKrc-cancel-1\r\n" +
+		"From: <sip:caller@example.test>;tag=from1\r\n" +
+		"To: <sip:remote_group@partner.example>\r\n" +
+		"Call-ID: rc-cancel-1\r\n" +
+		"CSeq: 1 CANCEL\r\n" +
+		"Content-Length: 0\r\n\r\n"
+	var cancelResp []string
+	s.handleRaw(context.Background(), "192.0.2.52:5060", "udp", []byte(cancel), func(b []byte) error {
+		cancelResp = append(cancelResp, string(b))
+		return nil
+	})
+	if len(cancelResp) == 0 || !strings.HasPrefix(cancelResp[0], "SIP/2.0 200") {
+		t.Fatalf("CANCEL responses = %v, want 200 first", cancelResp)
+	}
+
+	// The CANCEL is forwarded mirroring the INVITE's identifiers, filtered
+	// out from the INVITE retransmissions the unanswered relay produces.
+	deadline := time.After(3 * time.Second)
+	var forwarded *Message
+	for forwarded == nil {
+		select {
+		case raw := <-remote.got:
+			m, err := Parse(raw)
+			if err == nil && strings.HasPrefix(m.StartLine, "CANCEL ") {
+				forwarded = m
+			}
+		case <-deadline:
+			t.Fatal("remote never received the CANCEL")
+		}
+	}
+	if relayed.Header("Via") != forwarded.Header("Via") {
+		t.Fatalf("CANCEL Via %q does not mirror the INVITE Via %q",
+			forwarded.Header("Via"), relayed.Header("Via"))
+	}
+	if relayed.Header("Call-ID") != forwarded.Header("Call-ID") {
+		t.Fatal("CANCEL Call-ID does not match the relayed INVITE")
+	}
+}
