@@ -22,13 +22,21 @@ type User struct {
 }
 
 type Group struct {
-	ID          string    `json:"id,omitempty"`
-	URI         string    `json:"uri"`
-	DisplayName string    `json:"display_name"`
-	Description string    `json:"description"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	ID          string `json:"id,omitempty"`
+	URI         string `json:"uri"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	// MultiTalker marks the group as a multi-talker group (TS 24.380 clause
+	// 4.1.1.6): floor requests can be granted to several members at once. The
+	// group-document element of TS 24.481 is stood in for by this flag until
+	// the GMS generates it.
+	MultiTalker bool `json:"multi_talker,omitempty"`
+	// MaxSimultaneousTalkers is the "maximum number of simultaneous talkers"
+	// of TS 24.380 clause 4.1.1.6; 0 falls back to 2 when MultiTalker is set.
+	MaxSimultaneousTalkers int       `json:"max_simultaneous_talkers,omitempty"`
+	CreatedAt              time.Time `json:"created_at,omitempty"`
+	UpdatedAt              time.Time `json:"updated_at,omitempty"`
 }
 
 type GroupMembership struct {

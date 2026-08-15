@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildMCPTTFloorGranted(t *testing.T) {
-	packet := buildMCPTTFloorGranted(0x11223344, 45)
+	packet := buildMCPTTFloorGranted(0x11223344, 45, floorIndicatorNormal)
 
 	if len(packet) != 20 {
 		t.Fatalf("len=%d, want 20", len(packet))
@@ -29,14 +29,14 @@ func TestBuildMCPTTFloorGranted(t *testing.T) {
 	if got := string(packet[8:12]); got != "MCPT" {
 		t.Fatalf("app name=%q, want MCPT", got)
 	}
-	if packet[12] != mcpttDurationID || packet[13] != 2 {
-		t.Fatalf("duration field header=%x %x, want %x 02", packet[12], packet[13], mcpttDurationID)
+	if packet[12] != fldDuration || packet[13] != 2 {
+		t.Fatalf("duration field header=%x %x, want %x 02", packet[12], packet[13], fldDuration)
 	}
 	if got := binary.BigEndian.Uint16(packet[14:16]); got != 45 {
 		t.Fatalf("duration=%d, want 45", got)
 	}
-	if packet[16] != mcpttFloorIndicatorID || packet[17] != 2 {
-		t.Fatalf("floor indicator header=%x %x, want %x 02", packet[16], packet[17], mcpttFloorIndicatorID)
+	if packet[16] != fldFloorIndicator || packet[17] != 2 {
+		t.Fatalf("floor indicator header=%x %x, want %x 02", packet[16], packet[17], fldFloorIndicator)
 	}
 	if got := binary.BigEndian.Uint16(packet[18:20]); got != mcpttNormalCall {
 		t.Fatalf("floor indicator=%x, want %x", got, mcpttNormalCall)
@@ -113,7 +113,7 @@ func TestBuildMCPTTQueuePosition(t *testing.T) {
 }
 
 func TestParseMCPTTFloorEvent(t *testing.T) {
-	packet := buildMCPTTFloorGranted(0x01020304, 30)
+	packet := buildMCPTTFloorGranted(0x01020304, 30, floorIndicatorNormal)
 	packet[0] = 0x80 | mcpttFloorRequest
 
 	event, ok := parseMCPTTFloorEvent(packet)

@@ -18,6 +18,7 @@ import (
 type Store interface {
 	ListCalls(context.Context) ([]store.MCPTTCall, error)
 	ListCallsByGroup(context.Context, string) ([]store.MCPTTCall, error)
+	ListGroups(context.Context) ([]store.Group, error)
 	IncrementCallMedia(context.Context, string, string, int) error
 	UpdateCallRTPStats(context.Context, string, store.RTPStatsUpdate) error
 	UpdateCallFloorState(context.Context, string, store.FloorStateUpdate) (bool, error)
@@ -133,7 +134,29 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 			}
 			slog.Info("MCPTT floor event", "call_id", call.CallID, "remote", remoteText, "event", eventName, "state", floorState, "subtype", event.Subtype, "ssrc", event.SSRC)
 			if event.Subtype == mcpttFloorRelease && o.cfg.Media.FloorAutoGrant && clearHolder {
-				response := buildMCPTTFloorIdle(event.SSRC)
+				// TS 24.380 clause 6.3.4.4.4/6.3.4.4.8: after a release the
+				// server tells the releaser (and the other participants) that
+				// the floor is idle - unless the group is multi-talker and
+				// other talkers keep the floor, in which case a Floor Release
+				// Multi Talker message (clause 8.2.14) announces just this
+				// participant's release.
+				multiTalker, _ := o.groupFloorPolicy(ctx, call.GroupURI)
+				var peers []store.MCPTTCall
+				if strings.TrimSpace(call.GroupURI) != "" {
+					peers, _ = o.st.ListCallsByGroup(ctx, call.GroupURI)
+				}
+				remaining := 0
+				for _, talker := range grantedTalkerLegs(peers) {
+					if talker.CallID != call.CallID {
+						remaining++
+					}
+				}
+				var response []byte
+				if multiTalker && remaining > 0 {
+					response = buildMCPTTFloorReleaseMultiTalker(event.SSRC, o.legUser(call), event.SSRC)
+				} else {
+					response = buildMCPTTFloorIdle(event.SSRC)
+				}
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT floor idle send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
@@ -146,8 +169,9 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 					}); err != nil {
 						slog.Warn("MCPTT floor idle state update failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 					}
-					slog.Info("MCPTT floor idle", "call_id", call.CallID, "remote", remoteText)
+					slog.Info("MCPTT floor idle", "call_id", call.CallID, "remote", remoteText, "multi_talker_remaining", remaining)
 				}
+				o.notifyFloorPeers(pc, peers, call.CallID, response)
 				return
 			}
 			if event.Subtype == mcpttQueuePositionReq && o.cfg.Media.FloorAutoGrant {
@@ -169,6 +193,21 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				return
 			}
 			if event.Subtype == mcpttFloorRequest && o.cfg.Media.FloorAutoGrant && call.State != "terminated" && call.State != "cancelled" {
+				// Group-wide arbitration (TS 24.380 clause 6.3.4.4.2 /
+				// 6.3.4.4.7a): a single-talker group refuses while any other
+				// leg holds the floor; a multi-talker group grants until the
+				// maximum number of simultaneous talkers is reached.
+				multiTalker, maxTalkers := o.groupFloorPolicy(ctx, call.GroupURI)
+				var peers []store.MCPTTCall
+				if strings.TrimSpace(call.GroupURI) != "" {
+					peers, _ = o.st.ListCallsByGroup(ctx, call.GroupURI)
+				}
+				otherTalkers := []store.MCPTTCall{}
+				for _, talker := range grantedTalkerLegs(peers) {
+					if talker.CallID != call.CallID {
+						otherTalkers = append(otherTalkers, talker)
+					}
+				}
 				// Claim the floor before announcing it. floorCanGrant decides
 				// from a snapshot read moments ago, so two requests from
 				// different SSRCs can both reach here believing the floor is
@@ -177,7 +216,7 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 				// loser is denied rather than being granted a floor it does
 				// not hold.
 				granted := false
-				if floorCanGrant(call, event.SSRC) {
+				if floorCanGrant(call, event.SSRC) && floorArbitrate(call, len(otherTalkers), multiTalker, maxTalkers) {
 					expected := call.FloorHolder
 					applied, err := o.st.UpdateCallFloorState(ctx, call.CallID, store.FloorStateUpdate{
 						State:        "granted",
@@ -213,12 +252,29 @@ func (o *Observer) recordPacket(ctx context.Context, pc net.PacketConn, kind str
 					return
 				}
 				// The floor is now held in the store, so announce it.
-				response := buildMCPTTFloorGranted(event.SSRC, o.cfg.Media.FloorGrantDurationSeconds)
+				indicator := uint16(floorIndicatorNormal)
+				if multiTalker {
+					indicator |= floorIndicatorMultiTalker
+				}
+				response := buildMCPTTFloorGranted(event.SSRC, o.cfg.Media.FloorGrantDurationSeconds, indicator)
 				if _, err := pc.WriteTo(response, remote); err != nil {
 					slog.Warn("MCPTT floor grant send failed", "call_id", call.CallID, "remote", remoteText, "err", err)
 				} else {
-					slog.Info("MCPTT floor granted", "call_id", call.CallID, "remote", remoteText, "duration", o.cfg.Media.FloorGrantDurationSeconds)
+					slog.Info("MCPTT floor granted", "call_id", call.CallID, "remote", remoteText, "duration", o.cfg.Media.FloorGrantDurationSeconds, "multi_talker", multiTalker, "talkers", len(otherTalkers)+1)
 				}
+				// TS 24.380 clause 6.3.4.4.2 item c (and 6.3.4.4.7a item c for
+				// multi-talker): the other participants learn of the grant
+				// through a Floor Taken message; in the multi-talker case it
+				// carries the full talker set in the List of Granted Users and
+				// List of SSRCs fields.
+				grantedUsers := []string{o.legUser(call)}
+				audioSSRCs := []uint32{event.SSRC}
+				for _, talker := range otherTalkers {
+					grantedUsers = append(grantedUsers, o.legUser(talker))
+					audioSSRCs = append(audioSSRCs, talker.FloorSSRC)
+				}
+				taken := buildMCPTTFloorTaken(event.SSRC, o.legUser(call), indicator, grantedUsers, audioSSRCs)
+				o.notifyFloorPeers(pc, peers, call.CallID, taken)
 			}
 		} else {
 			slog.Debug("MCPTT floor packet received", "call_id", call.CallID, "remote", remoteText, "bytes", len(packet), "sample", packetSample(packet))
@@ -355,22 +411,26 @@ func hostMatches(a, b string) bool {
 	return a == b
 }
 
+// Floor control message subtypes, TS 24.380 table 8.2.2.1-1 (the
+// acknowledgment-request x bit masked off).
 const (
-	rtcpPacketTypeAPP     = 204
-	mcpttFloorRequest     = 0
-	mcpttFloorGranted     = 1
-	mcpttFloorTaken       = 2
-	mcpttFloorDeny        = 3
-	mcpttFloorRelease     = 4
-	mcpttFloorIdle        = 5
-	mcpttFloorRevoke      = 6
-	mcpttQueuePositionReq = 8
-	mcpttQueuePosition    = 9
-	mcpttFloorAck         = 10
-	mcpttFloorIndicatorID = 0x0d
-	mcpttDurationID       = 0x01
-	mcpttNormalCall       = 0x8000
-	rtpClockRate          = 8000
+	rtcpPacketTypeAPP            = 204
+	mcpttFloorRequest            = 0
+	mcpttFloorGranted            = 1
+	mcpttFloorTaken              = 2
+	mcpttFloorDeny               = 3
+	mcpttFloorRelease            = 4
+	mcpttFloorIdle               = 5
+	mcpttFloorRevoke             = 6
+	mcpttFloorRevokeRequest      = 7
+	mcpttQueuePositionReq        = 8
+	mcpttQueuePosition           = 9
+	mcpttFloorAck                = 10
+	mcpttUnicastMediaFlowControl = 11
+	mcpttQueuedFloorRequests     = 14
+	mcpttFloorReleaseMultiTalker = 15
+	mcpttNormalCall              = floorIndicatorNormal
+	rtpClockRate                 = 8000
 )
 
 type rtpHeader struct {
@@ -469,6 +529,13 @@ func rtpAuthorizedForFloor(call store.MCPTTCall, ssrc uint32) bool {
 type floorEvent struct {
 	Subtype uint8
 	SSRC    uint32
+	// Parsed application-specific data fields (clause 8.1.3), where present.
+	Priority     uint8
+	HasPriority  bool
+	Indicator    uint16
+	HasIndicator bool
+	UserID       string
+	GrantedUsers []string
 }
 
 func floorEventName(subtype uint8) string {
@@ -493,6 +560,14 @@ func floorEventName(subtype uint8) string {
 		return "queue_position"
 	case mcpttFloorAck:
 		return "ack"
+	case mcpttFloorRevokeRequest:
+		return "revoke_request"
+	case mcpttUnicastMediaFlowControl:
+		return "unicast_media_flow_control"
+	case mcpttQueuedFloorRequests:
+		return "queued_floor_requests"
+	case mcpttFloorReleaseMultiTalker:
+		return "release_multi_talker"
 	default:
 		return fmt.Sprintf("subtype_%d", subtype)
 	}
@@ -597,33 +672,48 @@ func parseMCPTTFloorEvent(packet []byte) (floorEvent, bool) {
 	if string(packet[8:12]) != "MCPT" {
 		return floorEvent{}, false
 	}
-	return floorEvent{
-		Subtype: packet[0] & 0x1f,
+	// The x bit of the subtype only asks for an acknowledgment
+	// (table 8.2.2.1-1); the low four bits identify the message.
+	event := floorEvent{
+		Subtype: packet[0] & 0x0f,
 		SSRC:    binary.BigEndian.Uint32(packet[4:8]),
-	}, true
+	}
+	walkFloorFields(packet[12:], func(id byte, value []byte) {
+		switch id {
+		case fldFloorPriority:
+			if len(value) >= 1 {
+				event.Priority = value[0]
+				event.HasPriority = true
+			}
+		case fldFloorIndicator:
+			if len(value) >= 2 {
+				event.Indicator = binary.BigEndian.Uint16(value[:2])
+				event.HasIndicator = true
+			}
+		case fldUserID:
+			event.UserID = string(value)
+		case fldGrantedUsers:
+			event.GrantedUsers = decodeGrantedUsers(value)
+		}
+	})
+	return event, true
 }
 
-func buildMCPTTFloorGranted(ssrc uint32, durationSeconds int) []byte {
+func buildMCPTTFloorGranted(ssrc uint32, durationSeconds int, indicator uint16) []byte {
 	if durationSeconds < 1 {
 		durationSeconds = 30
 	}
 	if durationSeconds > 65535 {
 		durationSeconds = 65535
 	}
-	packet := make([]byte, 20)
-	packet[0] = 0x80 | mcpttFloorGranted
-	packet[1] = rtcpPacketTypeAPP
-	binary.BigEndian.PutUint16(packet[2:4], uint16((len(packet)/4)-1))
-	binary.BigEndian.PutUint32(packet[4:8], ssrc)
-	copy(packet[8:12], "MCPT")
-
-	packet[12] = mcpttDurationID
-	packet[13] = 2
-	binary.BigEndian.PutUint16(packet[14:16], uint16(durationSeconds))
-	packet[16] = mcpttFloorIndicatorID
-	packet[17] = 2
-	binary.BigEndian.PutUint16(packet[18:20], mcpttNormalCall)
-	return packet
+	var fields []byte
+	var dur [2]byte
+	binary.BigEndian.PutUint16(dur[:], uint16(durationSeconds))
+	fields = appendFloorField(fields, fldDuration, dur[:])
+	var ind [2]byte
+	binary.BigEndian.PutUint16(ind[:], indicator)
+	fields = appendFloorField(fields, fldFloorIndicator, ind[:])
+	return floorMessage(mcpttFloorGranted, ssrc, fields)
 }
 
 func buildMCPTTFloorDeny(ssrc uint32) []byte {
