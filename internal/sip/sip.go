@@ -410,6 +410,8 @@ func (s *Server) handleRaw(ctx context.Context, source, transport string, raw []
 		s.handleCANCEL(ctx, send, msg, source, transport)
 	case "UPDATE", "INFO":
 		s.handleInDialogRequest(ctx, send, msg, source, transport)
+	case "MESSAGE":
+		s.handleMessage(ctx, send, msg, source, transport)
 	default:
 		s.respond(send, msg, 405, "Method Not Allowed", optionsHeaders(), nil)
 	}
