@@ -106,36 +106,118 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 
-	if isGeneratedDocumentAUID(auidFromPath(path)) {
+	docPath, nodeSelector := splitNodeSelector(path)
+
+	var body, docContentType string
+	switch {
+	case isGeneratedDocumentAUID(auidFromPath(docPath)):
 		setXCAPResult(r, "default")
-		body := s.defaultDocumentForRequest(r, path)
-		writeXMLDocument(w, path, body)
+		body = s.defaultDocumentForRequest(r, docPath)
+		docContentType = contentTypeForPath(docPath)
+	default:
+		doc, err := s.st.GetCMSDocumentByPath(r.Context(), docPath)
+		if err != nil {
+			setXCAPResult(r, "store_error")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if doc == nil {
+			// RFC 4825 clause 8.2.1: a document that does not exist is a 404.
+			// Unknown application usages are no longer answered with an
+			// invented placeholder document.
+			setXCAPResult(r, "not_found")
+			http.Error(w, "document not found", http.StatusNotFound)
+			return
+		}
+		setXCAPResult(r, "stored")
+		body = doc.Body
+		docContentType = valueOr(doc.ContentType, contentTypeForPath(docPath))
+	}
+
+	tag := ContentETag(body)
+	// RFC 2616 conditional GET: the ETag is always the full document's, also
+	// for node-selector fetches (RFC 4825 clause 7.10).
+	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && (match == "*" || etagMatches(match, tag)) {
+		setXCAPResult(r, "not_modified")
+		w.Header().Set("ETag", tag)
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	doc, err := s.st.GetCMSDocumentByPath(r.Context(), path)
-	if err != nil {
-		setXCAPResult(r, "store_error")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if nodeSelector != "" {
+		fragment, isAttr, found, err := selectNode(body, nodeSelector)
+		if err != nil {
+			setXCAPResult(r, "bad_node_selector")
+			writeXCAPError(w, http.StatusConflict, xcapErrorBody("cannot-insert", err.Error()))
+			return
+		}
+		if !found {
+			setXCAPResult(r, "node_not_found")
+			http.Error(w, "node not found", http.StatusNotFound)
+			return
+		}
+		contentType := "application/xcap-el+xml"
+		if isAttr {
+			contentType = "application/xcap-att+xml"
+		}
+		setXCAPResult(r, "node")
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("ETag", tag)
+		w.Header().Set("Content-Length", fmt.Sprint(len(fragment)))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fragment))
+		slog.Info("xcap_get_node", "auid", auidFromPath(docPath), "path", docPath, "node", nodeSelector, "attr", isAttr, "etag", tag, "response_bytes", len(fragment))
 		return
 	}
-	if doc == nil {
-		setXCAPResult(r, "default")
-		body := s.defaultDocumentForRequest(r, path)
-		writeXMLDocument(w, path, body)
-		return
-	}
-	setXCAPResult(r, "stored")
-	tag := ContentETag(doc.Body)
-	w.Header().Set("Content-Type", valueOr(doc.ContentType, contentTypeForPath(path)))
+
+	w.Header().Set("Content-Type", docContentType)
 	w.Header().Set("ETag", tag)
-	w.Header().Set("Content-Length", fmt.Sprint(len(doc.Body)))
+	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(doc.Body))
-	slog.Info("xcap_get", "auid", auidFromPath(path), "path", path, "etag", tag, "status", http.StatusOK, "response_bytes", len(doc.Body))
+	w.Write([]byte(body))
+	slog.Info("xcap_get", "auid", auidFromPath(docPath), "path", docPath, "etag", tag, "status", http.StatusOK, "response_bytes", len(body))
+}
+
+// etagMatches compares an If-Match/If-None-Match header against the current
+// entity tag, accepting a comma-separated list.
+func etagMatches(headerValue, tag string) bool {
+	for _, candidate := range strings.Split(headerValue, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func writeXCAPError(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/xcap-error+xml")
+	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+	w.WriteHeader(status)
+	w.Write([]byte(body))
 }
 
 func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
+	// Documents under the generated application usages are derived live from
+	// provisioning state; storing a client's copy would either shadow the
+	// generated content or silently diverge from what GET returns. RFC 4825
+	// clause 8.2.2 allows the server to refuse with a constraint failure.
+	if isGeneratedDocumentAUID(auidFromPath(path)) {
+		setXCAPResult(r, "generated_readonly")
+		writeXCAPError(w, http.StatusConflict,
+			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify users/groups via the management API"))
+		return
+	}
+	if docPath, node := splitNodeSelector(path); node != "" {
+		// Node-selector PUT/DELETE (partial document mutation, RFC 4825
+		// clauses 8.2.3/8.2.5) is not offered; stored documents are managed
+		// whole.
+		_ = docPath
+		setXCAPResult(r, "node_write_unsupported")
+		writeXCAPError(w, http.StatusConflict,
+			xcapErrorBody("cannot-insert", "partial document modification is not supported"))
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		setXCAPResult(r, "read_error")
@@ -147,6 +229,24 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
 	if err != nil {
 		setXCAPResult(r, "store_error")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Conditional operations, RFC 4825 clause 7.11: If-Match against the
+	// current entity, If-None-Match: * to require creation.
+	currentTag := ""
+	if existing != nil {
+		currentTag = ContentETag(existing.Body)
+	}
+	if match := strings.TrimSpace(r.Header.Get("If-Match")); match != "" {
+		if existing == nil || !etagMatches(match, currentTag) {
+			setXCAPResult(r, "precondition_failed")
+			http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+			return
+		}
+	}
+	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" && existing != nil && (match == "*" || etagMatches(match, currentTag)) {
+		setXCAPResult(r, "precondition_failed")
+		http.Error(w, "precondition failed", http.StatusPreconditionFailed)
 		return
 	}
 	doc := store.CMSDocument{
@@ -178,6 +278,12 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
 }
 
 func (s *Server) delete(w http.ResponseWriter, r *http.Request, path string) {
+	if isGeneratedDocumentAUID(auidFromPath(path)) {
+		setXCAPResult(r, "generated_readonly")
+		writeXCAPError(w, http.StatusConflict,
+			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify users/groups via the management API"))
+		return
+	}
 	doc, err := s.st.GetCMSDocumentByPath(r.Context(), path)
 	if err != nil {
 		setXCAPResult(r, "store_error")
@@ -185,8 +291,15 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	if doc == nil {
-		setXCAPResult(r, "missing")
-		w.WriteHeader(http.StatusNoContent)
+		// RFC 4825 clause 8.2.5: deleting a resource that does not exist is
+		// a 404, not a silent success.
+		setXCAPResult(r, "not_found")
+		http.Error(w, "document not found", http.StatusNotFound)
+		return
+	}
+	if match := strings.TrimSpace(r.Header.Get("If-Match")); match != "" && !etagMatches(match, ContentETag(doc.Body)) {
+		setXCAPResult(r, "precondition_failed")
+		http.Error(w, "precondition failed", http.StatusPreconditionFailed)
 		return
 	}
 	if err := s.st.DeleteCMSDocument(r.Context(), doc.ID); err != nil {
@@ -206,18 +319,10 @@ func writeXML(w http.ResponseWriter, body string) {
 	w.Write([]byte(body))
 }
 
-func writeXMLDocument(w http.ResponseWriter, path string, body string) {
-	tag := ContentETag(body)
-	w.Header().Set("Content-Type", contentTypeForPath(path))
-	w.Header().Set("ETag", tag)
-	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(body))
-	slog.Info("xcap_get", "auid", auidFromPath(path), "path", path, "etag", tag, "status", http.StatusOK, "response_bytes", len(body), "group_count", groupDocumentCount(path, body), "member_count", groupMemberCount(path, body))
-}
-
 func contentTypeForPath(path string) string {
 	switch auidFromPath(path) {
+	case "xcap-caps":
+		return "application/xcap-caps+xml"
 	case "org.3gpp.mcptt.ue-init-config":
 		return "application/vnd.3gpp.mcptt-ue-init-config+xml"
 	case "org.3gpp.mcptt.ue-config":
@@ -255,7 +360,8 @@ func (s *Server) defaultDocumentForRequest(r *http.Request, path string) string 
 // Keep this in sync with the case list in DefaultDocument's switch.
 func isGeneratedDocumentAUID(auid string) bool {
 	switch auid {
-	case "org.3gpp.mcptt.ue-init-config",
+	case "xcap-caps",
+		"org.3gpp.mcptt.ue-init-config",
 		"org.3gpp.mcptt.ue-config",
 		"org.3gpp.mcptt.user-profile",
 		"org.3gpp.mcptt.service-config",
@@ -268,6 +374,8 @@ func isGeneratedDocumentAUID(auid string) bool {
 
 func (s *Server) DefaultDocument(ctx context.Context, path string) string {
 	switch auidFromPath(path) {
+	case "xcap-caps":
+		return defaultXCAPCaps()
 	case "org.3gpp.mcptt.ue-init-config":
 		return s.defaultUEInitConfig(ctx, path)
 	case "org.3gpp.mcptt.ue-config":
@@ -279,7 +387,9 @@ func (s *Server) DefaultDocument(ctx context.Context, path string) string {
 	case "org.openmobilealliance.groups":
 		return s.defaultGMSGroup(ctx, path)
 	default:
-		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?><mcx-document path=%q />`, path)
+		// Unknown application usages have no generated form; the GET path
+		// answers 404 for them (RFC 4825 clause 8.2.1).
+		return ""
 	}
 }
 
@@ -585,12 +695,28 @@ func (s *Server) defaultGMSGroup(ctx context.Context, path string) string {
 		displayName = group.URI
 	}
 	members := buildGMSMemberEntries(users, memberships, group.ID)
+	// TS 24.481 clause 7.2.2 items z1/e: the <multi-talker-control> element
+	// marks a multi-talker group, and <supported-services> with the MCPTT
+	// ICSI and <mcptt-speech> group media identifies the document as an MCPTT
+	// group document.
+	multiTalker := ""
+	if group.MultiTalker {
+		multiTalker = `
+    <mcpttgi:multi-talker-control>true</mcpttgi:multi-talker-control>`
+	}
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<group xmlns="urn:oma:xml:poc:list-service" xmlns:rl="urn:ietf:params:xml:ns:resource-lists" xmlns:cp="urn:ietf:params:xml:ns:common-policy" xmlns:ocp="urn:oma:xml:xdm:common-policy" xmlns:oxe="urn:oma:xml:xdm:extensions" xmlns:mcpttgi="urn:3gpp:ns:mcpttGroupInfo:1.0">
+<group xmlns="urn:oma:xml:poc:list-service" xmlns:rl="urn:ietf:params:xml:ns:resource-lists" xmlns:cp="urn:ietf:params:xml:ns:common-policy" xmlns:ocp="urn:oma:xml:xdm:common-policy" xmlns:oxe="urn:oma:xml:xdm:extensions" xmlns:oxg="urn:oma:xml:xdm:group" xmlns:mcpttgi="urn:3gpp:ns:mcpttGroupInfo:1.0">
   <list-service uri="%s">
     <display-name xml:lang="en">%s</display-name>
     <list>%s
     </list>
+    <oxg:supported-services>
+      <oxg:service enabler="urn:urn-7:3gpp-service.ims.icsi.mcptt">
+        <oxg:group-media>
+          <mcpttgi:mcptt-speech/>
+        </oxg:group-media>
+      </oxg:service>
+    </oxg:supported-services>
     <max-participant-count>200</max-participant-count>
     <cp:ruleset>
       <cp:rule id="vectorcore-default">
@@ -600,12 +726,13 @@ func (s *Server) defaultGMSGroup(ctx context.Context, path string) string {
         </cp:actions>
       </cp:rule>
     </cp:ruleset>
-    <mcpttgi:on-network-group-priority>1</mcpttgi:on-network-group-priority>
+    <mcpttgi:on-network-group-priority>1</mcpttgi:on-network-group-priority>%s
   </list-service>
 </group>`,
 		xmlText(group.URI),
 		xmlText(displayName),
 		members,
+		multiTalker,
 	)
 	slog.Info("GMS group document generated",
 		"path", path,
@@ -631,18 +758,38 @@ func (s *Server) defaultUserProfile(ctx context.Context, path string) string {
 	displayName := userDisplayName(user)
 	groupEntries := buildGroupEntries(groups, memberships, user.ID)
 	implicitEntries := buildImplicitAffiliationEntries(groups, memberships, user.ID)
+	faEntries := buildFunctionalAliasEntries(user.FunctionalAliases)
 	if userURI == "" {
 		userURI = xui
 	}
 	if displayName == "" {
 		displayName = userURI
 	}
-	return userProfileDocument(userURI, displayName, "VectorCore User Profile", groupEntries, implicitEntries)
+	return userProfileDocument(userURI, displayName, "VectorCore User Profile", groupEntries, implicitEntries, faEntries)
 }
 
 func (s *Server) defaultDefaultUserProfile() string {
 	defaultURI := s.cfg.MCX.DefaultUserIdentity
-	return userProfileDocument(defaultURI, defaultURI, "VectorCore Default Profile", "", "")
+	return userProfileDocument(defaultURI, defaultURI, "VectorCore Default Profile", "", "", "")
+}
+
+// buildFunctionalAliasEntries renders the <FunctionalAliasList> entries of
+// TS 24.484 clause 6.3.13.2.10: the functional aliases the user is authorised
+// to activate, matching the list handleFunctionalAliasPublish authorises
+// against (TS 24.379 clause 9A.2.2.2.3 step 4A).
+func buildFunctionalAliasEntries(aliases []string) string {
+	var b strings.Builder
+	for _, alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		fmt.Fprintf(&b, `
+        <entry>
+          <uri-entry>%s</uri-entry>
+        </entry>`, xmlText(alias))
+	}
+	return b.String()
 }
 
 func (s *Server) plmn() string {
@@ -654,7 +801,15 @@ func (s *Server) plmn() string {
 	return mcc + mnc
 }
 
-func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntries string) string {
+func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntries, faEntries string) string {
+	faList := ""
+	if faEntries != "" {
+		faList = fmt.Sprintf(`
+    <anyExt>
+      <FunctionalAliasList>%s
+      </FunctionalAliasList>
+    </anyExt>`, faEntries)
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <mcptt-user-profile XUI-URI=%q user-profile-index="0" xmlns="urn:3gpp:mcptt:user-profile:1.0">
   <Name xml:lang="en">%s</Name>
@@ -690,7 +845,7 @@ func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntri
     <MCPTTGroupInfo xml:lang="en" index="0">%s
     </MCPTTGroupInfo>
     <ImplicitAffiliations xml:lang="en" index="0">%s
-    </ImplicitAffiliations>
+    </ImplicitAffiliations>%s
   </OnNetwork>
 </mcptt-user-profile>`,
 		xmlText(userURI),
@@ -702,20 +857,24 @@ func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntri
 		xmlText(displayName),
 		groupEntries,
 		implicitEntries,
+		faList,
 	)
 }
 
 func gmsGroupURIFromPath(path string) string {
-	const marker = "/global/byGroup/"
-	idx := strings.Index(path, marker)
-	if idx < 0 {
-		return ""
+	// TS 24.481 table 7.2.10.2-1: group documents live in the "byGroupID"
+	// subdirectory of the global tree. The pre-conformance "byGroup" spelling
+	// stays accepted for already-deployed clients.
+	for _, marker := range []string{"/global/byGroupID/", "/global/byGroup/"} {
+		if idx := strings.Index(path, marker); idx >= 0 {
+			groupURI := strings.TrimSpace(path[idx+len(marker):])
+			if decoded, err := url.PathUnescape(groupURI); err == nil {
+				groupURI = decoded
+			}
+			return groupURI
+		}
 	}
-	groupURI := strings.TrimSpace(path[idx+len(marker):])
-	if decoded, err := url.PathUnescape(groupURI); err == nil {
-		groupURI = decoded
-	}
-	return groupURI
+	return ""
 }
 
 func findGroupByURI(groups []store.Group, uri string) store.Group {
@@ -800,20 +959,6 @@ func etag(body string) string {
 func ContentETag(body string) string {
 	sum := sha1.Sum([]byte(body))
 	return `"` + hex.EncodeToString(sum[:]) + `"`
-}
-
-func groupDocumentCount(path, body string) int {
-	if auidFromPath(path) != "org.openmobilealliance.groups" {
-		return 0
-	}
-	return strings.Count(body, "<list-service ")
-}
-
-func groupMemberCount(path, body string) int {
-	if auidFromPath(path) != "org.openmobilealliance.groups" {
-		return 0
-	}
-	return strings.Count(body, "<entry ")
 }
 
 func auidFromPath(path string) string {

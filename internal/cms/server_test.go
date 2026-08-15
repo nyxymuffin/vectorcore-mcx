@@ -584,16 +584,29 @@ func TestXCAPGeneratedDocumentETagIsStableAndStillReturnsBody(t *testing.T) {
 	}
 	body := rr.Body.String()
 
+	// Conditional GET, RFC 4825 clause 7.10: a matching If-None-Match is a
+	// 304 without a body (this replaced the pre-conformance behavior of
+	// ignoring the header and re-sending the document).
 	req = httptest.NewRequest(http.MethodGet, "/xcap-root/org.3gpp.mcptt.service-config/global/service-config.xml", nil)
 	req.Header.Set("If-None-Match", tag)
 	rr = httptest.NewRecorder()
 	s.handleXCAP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body:\n%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304; body:\n%s", rr.Code, rr.Body.String())
 	}
 	if got := rr.Header().Get("ETag"); got != tag {
 		t.Fatalf("etag = %q, want %q", got, tag)
+	}
+
+	// A stale entity tag still gets the full document.
+	req = httptest.NewRequest(http.MethodGet, "/xcap-root/org.3gpp.mcptt.service-config/global/service-config.xml", nil)
+	req.Header.Set("If-None-Match", `"different"`)
+	rr = httptest.NewRecorder()
+	s.handleXCAP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for stale etag", rr.Code)
 	}
 	if got := rr.Body.String(); got != body {
 		t.Fatalf("body changed for unchanged content:\nfirst:\n%s\nsecond:\n%s", body, got)
