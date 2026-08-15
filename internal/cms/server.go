@@ -289,13 +289,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	if docPath, node := splitNodeSelector(path); node != "" {
-		// Node-selector PUT/DELETE (partial document mutation, RFC 4825
-		// clauses 8.2.3/8.2.5) is not offered; stored documents are managed
-		// whole.
-		_ = docPath
-		setXCAPResult(r, "node_write_unsupported")
-		writeXCAPError(w, http.StatusConflict,
-			xcapErrorBody("cannot-insert", "partial document modification is not supported"))
+		s.putNode(w, r, docPath, node)
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -365,6 +359,10 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, path string) {
 		setXCAPResult(r, "generated_readonly")
 		writeXCAPError(w, http.StatusConflict,
 			xcapErrorBody("constraint-failure", "document is generated from provisioning state; modify it via the management API"))
+		return
+	}
+	if docPath, node := splitNodeSelector(path); node != "" {
+		s.deleteNode(w, r, docPath, node)
 		return
 	}
 	doc, err := s.st.GetCMSDocumentByPath(r.Context(), path)
@@ -1353,4 +1351,106 @@ func statusResult(status int) string {
 	default:
 		return "ok"
 	}
+}
+
+// putNode applies a node-selector PUT to a stored document (RFC 4825
+// clauses 8.2.3/8.2.4).
+func (s *Server) putNode(w http.ResponseWriter, r *http.Request, docPath, selector string) {
+	doc, err := s.st.GetCMSDocumentByPath(r.Context(), docPath)
+	if err != nil {
+		setXCAPResult(r, "store_error")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if doc == nil {
+		// Clause 8.2.1: no document means no parent for the node.
+		setXCAPResult(r, "no_parent")
+		writeXCAPError(w, http.StatusConflict,
+			xcapErrorBody("no-parent", "the document does not exist"))
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		setXCAPResult(r, "read_error")
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if match := strings.TrimSpace(r.Header.Get("If-Match")); match != "" &&
+		!etagMatches(match, ContentETag(doc.Body)) {
+		setXCAPResult(r, "precondition_failed")
+		http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+		return
+	}
+
+	updated, replaced, conflict, applyErr := applyNodePut(
+		doc.Body, selector, string(body), r.Header.Get("Content-Type"))
+	if conflict != "" {
+		setXCAPResult(r, conflict)
+		writeXCAPError(w, http.StatusConflict, xcapErrorBody(conflict, applyErr.Error()))
+		return
+	}
+
+	stored := *doc
+	stored.Body = updated
+	if _, err := s.st.UpdateCMSDocument(r.Context(), doc.ID, stored); err != nil {
+		setXCAPResult(r, "store_error")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.documentChanged(docPath)
+	w.Header().Set("ETag", ContentETag(updated))
+	if replaced {
+		setXCAPResult(r, "node_replaced")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	setXCAPResult(r, "node_created")
+	w.WriteHeader(http.StatusCreated)
+}
+
+// deleteNode applies a node-selector DELETE (RFC 4825 clause 8.2.5): the
+// operation is idempotent, so a node that is not there is a 404.
+func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, docPath, selector string) {
+	doc, err := s.st.GetCMSDocumentByPath(r.Context(), docPath)
+	if err != nil {
+		setXCAPResult(r, "store_error")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if doc == nil {
+		setXCAPResult(r, "no_parent")
+		writeXCAPError(w, http.StatusConflict,
+			xcapErrorBody("no-parent", "the document does not exist"))
+		return
+	}
+	if match := strings.TrimSpace(r.Header.Get("If-Match")); match != "" &&
+		!etagMatches(match, ContentETag(doc.Body)) {
+		setXCAPResult(r, "precondition_failed")
+		http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+		return
+	}
+
+	updated, found, conflict, applyErr := applyNodeDelete(doc.Body, selector)
+	if conflict != "" {
+		setXCAPResult(r, conflict)
+		writeXCAPError(w, http.StatusConflict, xcapErrorBody(conflict, applyErr.Error()))
+		return
+	}
+	if !found {
+		setXCAPResult(r, "not_found")
+		http.Error(w, "node not found", http.StatusNotFound)
+		return
+	}
+
+	stored := *doc
+	stored.Body = updated
+	if _, err := s.st.UpdateCMSDocument(r.Context(), doc.ID, stored); err != nil {
+		setXCAPResult(r, "store_error")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.documentChanged(docPath)
+	w.Header().Set("ETag", ContentETag(updated))
+	setXCAPResult(r, "node_deleted")
+	w.WriteHeader(http.StatusNoContent)
 }
