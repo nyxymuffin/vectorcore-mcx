@@ -518,66 +518,191 @@ func (s *Server) handlePublish(ctx context.Context, send responder, msg *Message
 	s.respond(send, msg, 200, "OK", []header{{"SIP-ETag", sipETag()}}, nil)
 }
 
+// handlePresencePublish implements TS 24.379 clause 9.2.2.2.3: the pidf body
+// carries the client's full desired affiliation set - groups listed are
+// (re-)affiliated, publish-sourced affiliations absent from the body are
+// de-affiliated, Expires 0 clears everything, and the N2 limit caps the set.
 func (s *Server) handlePresencePublish(ctx context.Context, send responder, msg *Message) {
 	userURI := identityFrom(msg)
 	if mcpttID := mcpttIdentityFromBody(msg); mcpttID != "" {
 		userURI = mcpttID
 	}
-	groupURI, state := affiliationFromPresenceBody(msg)
-	if groupURI == "" {
+	groups := affiliationGroupsFromPresenceBody(msg)
+	if len(groups) == 0 && strings.TrimSpace(msg.Header("Expires")) != "0" {
 		slog.Info("MCPTT affiliation PUBLISH ignored", "reason", "no_group", "user_uri", userURI, "call_id", msg.Header("Call-ID"))
 		s.respond(send, msg, 200, "OK", []header{{"SIP-ETag", sipETag()}}, nil)
 		return
 	}
-	userID, groupID, ok := s.userGroupIDs(ctx, userURI, groupURI)
-	if !ok {
-		slog.Warn("MCPTT affiliation PUBLISH rejected", "reason", "unknown_user_or_group", "user_uri", userURI, "group_uri", groupURI, "call_id", msg.Header("Call-ID"))
+
+	// Step 5: Expires must be 4294967295 (affiliations are refreshed by
+	// re-publication) or 0 (removal); anything else - including absent - is
+	// 423 with Min-Expires.
+	expiresRaw := strings.TrimSpace(msg.Header("Expires"))
+	removeAll := false
+	switch expiresRaw {
+	case "4294967295":
+	case "0":
+		removeAll = true
+	default:
+		s.respond(send, msg, 423, "Interval Too Brief",
+			[]header{{"Min-Expires", "4294967295"}}, nil)
+		return
+	}
+
+	users, err := s.st.ListUsers(ctx)
+	if err != nil {
+		s.respond(send, msg, 500, "Server Internal Error", nil, nil)
+		return
+	}
+	userID := ""
+	for _, user := range users {
+		if strings.EqualFold(strings.TrimSpace(user.IMPU), strings.TrimSpace(userURI)) ||
+			strings.EqualFold(strings.TrimSpace(user.MCPTTID), strings.TrimSpace(userURI)) {
+			userID = user.ID
+			break
+		}
+	}
+	if userID == "" {
+		slog.Warn("MCPTT affiliation PUBLISH rejected", "reason", "unknown_user", "user_uri", userURI)
 		s.respond(send, msg, 403, "Forbidden", nil, nil)
 		return
 	}
-	member, err := s.st.IsGroupMember(ctx, userID, groupID)
+
+	// Resolve the desired groups to provisioned, membered groups; unknown or
+	// non-member groups drop out of the candidate set (the group-side
+	// authorisation of clause 9.2.2.3 would refuse them anyway).
+	allGroups, err := s.st.ListGroups(ctx)
 	if err != nil {
-		slog.Error("membership lookup failed", "err", err, "user_id", userID, "group_id", groupID)
 		s.respond(send, msg, 500, "Server Internal Error", nil, nil)
 		return
 	}
-	if !member {
-		slog.Warn("MCPTT affiliation PUBLISH rejected", "reason", "not_member", "user_uri", userURI, "group_uri", groupURI, "call_id", msg.Header("Call-ID"))
-		s.respond(send, msg, 403, "Forbidden", nil, nil)
-		return
+	var candidateIDs []string
+	if !removeAll {
+		seen := map[string]bool{}
+		for _, groupURI := range groups {
+			for _, g := range allGroups {
+				if !g.Enabled || seen[g.ID] || !strings.EqualFold(strings.TrimSpace(g.URI), strings.TrimSpace(groupURI)) {
+					continue
+				}
+				if member, err := s.st.IsGroupMember(ctx, userID, g.ID); err == nil && member {
+					seen[g.ID] = true
+					candidateIDs = append(candidateIDs, g.ID)
+				} else {
+					slog.Warn("MCPTT affiliation candidate dropped", "reason", "not_member", "user_uri", userURI, "group_uri", groupURI)
+				}
+			}
+		}
+		// N2 (clause 9.2.2.2.3: candidates beyond N2 are reduced per
+		// provider policy - this server keeps the first N2 listed).
+		if n2 := s.maxAffiliationsN2(); len(candidateIDs) > n2 {
+			slog.Warn("MCPTT affiliation set reduced to N2", "user_uri", userURI, "requested", len(candidateIDs), "n2", n2)
+			candidateIDs = candidateIDs[:n2]
+		}
 	}
-	aff := store.GroupAffiliation{
-		UserID:            userID,
-		GroupID:           groupID,
-		State:             state,
-		Source:            "publish",
-		LastPublishCallID: msg.Header("Call-ID"),
-		LastSeenAt:        time.Now().UTC(),
+	wanted := map[string]bool{}
+	for _, id := range candidateIDs {
+		wanted[id] = true
 	}
-	existing, err := s.findGroupAffiliation(ctx, userID, groupID)
+
+	// Reconcile: listed groups affiliate; publish-sourced affiliations not
+	// listed de-affiliate (step 14 a ii). Implicit affiliations from calls
+	// stay until their session ends.
+	existingAffs, err := s.st.ListGroupAffiliations(ctx)
 	if err != nil {
-		slog.Error("affiliation lookup failed", "err", err, "user_id", userID, "group_id", groupID)
 		s.respond(send, msg, 500, "Server Internal Error", nil, nil)
 		return
 	}
-	previousState := ""
-	operation := "create"
-	if existing != nil {
-		previousState = existing.State
-		operation = "update"
+	now := time.Now().UTC()
+	for _, aff := range existingAffs {
+		if aff.UserID != userID {
+			continue
+		}
+		if wanted[aff.GroupID] {
+			refreshed := aff
+			refreshed.State = "affiliated"
+			refreshed.Source = "publish"
+			refreshed.LastPublishCallID = msg.Header("Call-ID")
+			refreshed.LastSeenAt = now
+			if _, err := s.st.UpdateGroupAffiliation(ctx, aff.ID, refreshed); err != nil {
+				slog.Warn("affiliation refresh failed", "err", err, "user_id", userID, "group_id", aff.GroupID)
+			}
+			delete(wanted, aff.GroupID)
+			continue
+		}
+		if aff.Source == "publish" || removeAll {
+			if err := s.st.DeleteGroupAffiliation(ctx, aff.ID); err != nil {
+				slog.Warn("de-affiliation failed", "err", err, "user_id", userID, "group_id", aff.GroupID)
+			} else {
+				slog.Info("MCPTT de-affiliated", "user_uri", userURI, "group_id", aff.GroupID, "expires_zero", removeAll)
+			}
+		}
 	}
-	if existing == nil {
-		_, err = s.st.CreateGroupAffiliation(ctx, aff)
-	} else {
-		_, err = s.st.UpdateGroupAffiliation(ctx, existing.ID, aff)
+	for groupID := range wanted {
+		if _, err := s.st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
+			UserID: userID, GroupID: groupID, State: "affiliated", Source: "publish",
+			LastPublishCallID: msg.Header("Call-ID"), LastSeenAt: now,
+		}); err != nil {
+			slog.Warn("affiliation create failed", "err", err, "user_id", userID, "group_id", groupID)
+		} else {
+			slog.Info("MCPTT affiliated", "user_uri", userURI, "group_id", groupID, "source", "publish")
+		}
 	}
+
+	s.respond(send, msg, 200, "OK", []header{
+		{"SIP-ETag", sipETag()},
+		{"Expires", expiresRaw},
+	}, nil)
+}
+
+// maxAffiliationsN2 is the N2 limit of TS 22.280, matching the
+// <MaxAffiliationsN2> element the generated user profile advertises.
+func (s *Server) maxAffiliationsN2() int {
+	if s.cfg.SIP.MaxAffiliationsN2 > 0 {
+		return s.cfg.SIP.MaxAffiliationsN2
+	}
+	return 200
+}
+
+// affiliationCount counts a user's current affiliations (for the implicit
+// affiliation N2 refusal, warning "102").
+func (s *Server) affiliationCount(ctx context.Context, userID string) int {
+	affs, err := s.st.ListGroupAffiliations(ctx)
 	if err != nil {
-		slog.Error("affiliation update failed", "err", err, "user_id", userID, "group_id", groupID)
-		s.respond(send, msg, 500, "Server Internal Error", nil, nil)
-		return
+		return 0
 	}
-	slog.Info("MCPTT affiliation changed", "operation", operation, "user_uri", userURI, "user_id", userID, "group_uri", groupURI, "group_id", groupID, "previous_state", previousState, "state", state, "source", "publish", "call_id", msg.Header("Call-ID"))
-	s.respond(send, msg, 200, "OK", []header{{"SIP-ETag", sipETag()}}, nil)
+	count := 0
+	for _, aff := range affs {
+		if aff.UserID == userID {
+			count++
+		}
+	}
+	return count
+}
+
+// affiliationGroupsFromPresenceBody lists every group attribute of every
+// <affiliation> element - the client's full desired set (clause 9.3.1).
+func affiliationGroupsFromPresenceBody(msg *Message) []string {
+	body := msg.Body
+	if part := msg.Part("application/pidf+xml"); part != nil {
+		body = part.Body
+	}
+	text := string(body)
+	var out []string
+	for {
+		i := strings.Index(text, "<affiliation")
+		if i < 0 {
+			return out
+		}
+		text = text[i:]
+		end := strings.Index(text, ">")
+		if end < 0 {
+			return out
+		}
+		if g := xmlAttr(text[:end], "group"); strings.TrimSpace(g) != "" {
+			out = append(out, strings.TrimSpace(g))
+		}
+		text = text[end:]
+	}
 }
 
 func (s *Server) handleRegister(ctx context.Context, send responder, msg *Message, source, transport string) {
@@ -2373,8 +2498,14 @@ func (s *Server) admitGroupInvite(ctx context.Context, initiatorURI, groupURI st
 		// (clause 9.2.2.3.6 - stood in for by group membership) is
 		// affiliated implicitly (clause 9.2.2.3.7) instead of refused.
 		if group := s.groupByURI(ctx, groupURI); group != nil && group.ChatGroup && member {
+			// Implicit affiliation respects the N2 limit (clause 10.1.2.4.1.1
+			// step 6 via 9.2.2.3.7; refusal per warning "102").
+			if s.affiliationCount(ctx, userID) >= s.maxAffiliationsN2() {
+				return admissionVerdict{Status: 486, Reason: "Busy Here",
+					Warning: "102 too many simultaneous affiliations"}
+			}
 			if _, err := s.st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
-				UserID: userID, GroupID: groupID, State: "affiliated",
+				UserID: userID, GroupID: groupID, State: "affiliated", Source: "implicit",
 			}); err != nil {
 				slog.Warn("chat group implicit affiliation failed", "err", err, "user_id", userID, "group_id", groupID)
 			} else {

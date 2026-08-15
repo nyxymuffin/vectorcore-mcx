@@ -58,6 +58,11 @@ type SIPConfig struct {
 	Adhoc        AdhocConfig         `yaml:"adhoc"`
 	PrivateCall  PrivateCallConfig   `yaml:"private_call"`
 	Emergency    EmergencyConfig     `yaml:"emergency"`
+	// MaxAffiliationsN2 is the N2 limit of TS 22.280: the maximum number of
+	// simultaneous group affiliations per user, advertised as
+	// <MaxAffiliationsN2> in the generated user profile. 0 means the
+	// default of 200.
+	MaxAffiliationsN2 int `yaml:"max_affiliations_n2"`
 }
 
 // EmergencyConfig stands in for the <emergency-call> elements of the MCPTT

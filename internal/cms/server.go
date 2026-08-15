@@ -880,12 +880,12 @@ func (s *Server) defaultUserProfile(ctx context.Context, path string) string {
 	if displayName == "" {
 		displayName = userURI
 	}
-	return userProfileDocument(userURI, displayName, "VectorCore User Profile", groupEntries, implicitEntries, faEntries)
+	return userProfileDocument(userURI, displayName, "VectorCore User Profile", groupEntries, implicitEntries, faEntries, s.maxAffiliationsN2())
 }
 
 func (s *Server) defaultDefaultUserProfile() string {
 	defaultURI := s.cfg.MCX.DefaultUserIdentity
-	return userProfileDocument(defaultURI, defaultURI, "VectorCore Default Profile", "", "", "")
+	return userProfileDocument(defaultURI, defaultURI, "VectorCore Default Profile", "", "", "", s.maxAffiliationsN2())
 }
 
 // buildFunctionalAliasEntries renders the <FunctionalAliasList> entries of
@@ -907,6 +907,14 @@ func buildFunctionalAliasEntries(aliases []string) string {
 	return b.String()
 }
 
+// maxAffiliationsN2 mirrors the SIP-side N2 enforcement (TS 22.280).
+func (s *Server) maxAffiliationsN2() int {
+	if s.cfg.SIP.MaxAffiliationsN2 > 0 {
+		return s.cfg.SIP.MaxAffiliationsN2
+	}
+	return 200
+}
+
 func (s *Server) plmn() string {
 	mcc := strings.TrimSpace(s.cfg.IMS.MCC)
 	mnc := strings.TrimSpace(s.cfg.IMS.MNC)
@@ -916,7 +924,7 @@ func (s *Server) plmn() string {
 	return mcc + mnc
 }
 
-func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntries, faEntries string) string {
+func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntries, faEntries string, maxAffiliations int) string {
 	faList := ""
 	if faEntries != "" {
 		faList = fmt.Sprintf(`
@@ -955,7 +963,7 @@ func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntri
     </MCPTT-group-call>
   </Common>
   <OnNetwork index="0">
-    <MaxAffiliationsN2>200</MaxAffiliationsN2>
+    <MaxAffiliationsN2>%d</MaxAffiliationsN2>
     <MaxSimultaneousTransmissionsN7>1</MaxSimultaneousTransmissionsN7>
     <MCPTTGroupInfo xml:lang="en" index="0">%s
     </MCPTTGroupInfo>
@@ -970,6 +978,7 @@ func userProfileDocument(userURI, displayName, name, groupEntries, implicitEntri
 		xmlText(displayName),
 		xmlText(userURI),
 		xmlText(displayName),
+		maxAffiliations,
 		groupEntries,
 		implicitEntries,
 		faList,

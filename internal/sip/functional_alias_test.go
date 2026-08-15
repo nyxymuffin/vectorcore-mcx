@@ -181,6 +181,7 @@ func TestAffiliationPublishStillWorks(t *testing.T) {
 		"Call-ID: affil-1\r\n" +
 		"CSeq: 1 PUBLISH\r\n" +
 		"Event: presence\r\n" +
+		"Expires: 4294967295\r\n" +
 		"Content-Type: application/pidf+xml\r\n" +
 		"Content-Length: " + fmt.Sprint(len(pidf)) + "\r\n\r\n" + pidf
 
