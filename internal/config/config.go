@@ -291,6 +291,18 @@ type IDMSConfig struct {
 	AccessTokenTTLSeconds int `yaml:"access_token_ttl_seconds"`
 	// RefreshTokenTTLSeconds bounds refresh tokens (default 30 days).
 	RefreshTokenTTLSeconds int `yaml:"refresh_token_ttl_seconds"`
+	// Partners are the primary IdM services of other MC domains whose
+	// security tokens this one accepts (TS 33.180 clause B.7.4). Each
+	// entry pins an issuer to the JWKS its tokens are signed with; an
+	// assertion that matches no entry is refused.
+	Partners []PartnerIdMS `yaml:"partners"`
+}
+
+// PartnerIdMS identifies a partner MC domain's IdM service for the
+// inter-domain authorisation of TS 33.180 Annex B.7.
+type PartnerIdMS struct {
+	Issuer   string `yaml:"issuer"`
+	JWKSFile string `yaml:"jwks_file"`
 }
 
 type IMSConfig struct {

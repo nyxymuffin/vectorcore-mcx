@@ -285,6 +285,10 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		s.tokenFromCode(w, r)
 	case "refresh_token":
 		s.tokenFromRefresh(w, r)
+	case grantTokenExchange:
+		s.tokenFromExchange(w, r)
+	case grantJWTBearer:
+		s.tokenFromAssertion(w, r)
 	default:
 		oauthError(w, http.StatusBadRequest, "unsupported_grant_type")
 	}

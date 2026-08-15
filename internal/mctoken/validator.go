@@ -75,65 +75,75 @@ func New(jwksFile, issuer string) (*Validator, error) {
 	return &Validator{keys: keys, issuer: issuer, now: time.Now}, nil
 }
 
-// validate checks the token and returns its mcptt_id claim.
+// Validate checks the token and returns its mcptt_id claim.
 func (v *Validator) Validate(token string) (string, error) {
+	claims, err := v.ValidateClaims(token)
+	if err != nil {
+		return "", err
+	}
+	id, _ := claims["mcptt_id"].(string)
+	if strings.TrimSpace(id) == "" {
+		return "", fmt.Errorf("token carries no mcptt_id claim")
+	}
+	return strings.TrimSpace(id), nil
+}
+
+// ValidateClaims checks the signature, expiry and issuer of a token and
+// returns its full claim set. Callers that need claims beyond the MC
+// service ID - the inter-domain security tokens of TS 33.180 clause B.8
+// carry an audience naming the partner IdMS - use this directly.
+func (v *Validator) ValidateClaims(token string) (map[string]any, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {
-		return "", fmt.Errorf("token is not a compact JWS")
+		return nil, fmt.Errorf("token is not a compact JWS")
 	}
 
 	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", fmt.Errorf("token header: %w", err)
+		return nil, fmt.Errorf("token header: %w", err)
 	}
 	var header struct {
 		Alg string `json:"alg"`
 		Kid string `json:"kid"`
 	}
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
-		return "", fmt.Errorf("token header: %w", err)
+		return nil, fmt.Errorf("token header: %w", err)
 	}
 	// The allowed algorithm is fixed server-side. Honouring the token's own
 	// header is exactly the alg:none / key-confusion mistake.
 	if header.Alg != "ES256" {
-		return "", fmt.Errorf("token alg %q is not accepted (want ES256)", header.Alg)
+		return nil, fmt.Errorf("token alg %q is not accepted (want ES256)", header.Alg)
 	}
 
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || len(signature) != 64 {
-		return "", fmt.Errorf("token signature is not the 64 byte r||s form")
+		return nil, fmt.Errorf("token signature is not the 64 byte r||s form")
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	r := new(big.Int).SetBytes(signature[:32])
 	sv := new(big.Int).SetBytes(signature[32:])
 
 	if !v.verifyWithAnyKey(header.Kid, digest[:], r, sv) {
-		return "", fmt.Errorf("token signature does not verify against any trusted key")
+		return nil, fmt.Errorf("token signature does not verify against any trusted key")
 	}
 
 	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("token claims: %w", err)
+		return nil, fmt.Errorf("token claims: %w", err)
 	}
-	var claims struct {
-		Iss     string  `json:"iss"`
-		Exp     float64 `json:"exp"`
-		MCPTTID string  `json:"mcptt_id"`
-	}
+	claims := map[string]any{}
 	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
-		return "", fmt.Errorf("token claims: %w", err)
+		return nil, fmt.Errorf("token claims: %w", err)
 	}
 
-	if claims.Exp == 0 || v.now().After(time.Unix(int64(claims.Exp), 0)) {
-		return "", fmt.Errorf("token is expired or carries no expiry")
+	exp, _ := claims["exp"].(float64)
+	if exp == 0 || v.now().After(time.Unix(int64(exp), 0)) {
+		return nil, fmt.Errorf("token is expired or carries no expiry")
 	}
-	if v.issuer != "" && claims.Iss != v.issuer {
-		return "", fmt.Errorf("token issuer %q is not trusted", claims.Iss)
+	if iss, _ := claims["iss"].(string); v.issuer != "" && iss != v.issuer {
+		return nil, fmt.Errorf("token issuer %q is not trusted", iss)
 	}
-	if strings.TrimSpace(claims.MCPTTID) == "" {
-		return "", fmt.Errorf("token carries no mcptt_id claim")
-	}
-	return strings.TrimSpace(claims.MCPTTID), nil
+	return claims, nil
 }
 
 // verifyWithAnyKey tries the kid-matched key first and falls back to every

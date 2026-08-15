@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/config"
+	"github.com/svinson1121/vectorcore-mcx/internal/mctoken"
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
 	"github.com/svinson1121/vectorcore-mcx/internal/tlsutil"
 )
@@ -26,6 +27,9 @@ type Server struct {
 	startAt    time.Time
 	idmsSigner *idmsSigner
 	oidc       *oidcState
+	// partnerIdMS validates the security tokens of partner MC domains,
+	// keyed by their issuer (TS 33.180 clause B.7.4).
+	partnerIdMS map[string]*mctoken.Validator
 }
 
 func New(st store.Store, cfg config.Config, version string) *Server {
@@ -40,6 +44,7 @@ func New(st store.Store, cfg config.Config, version string) *Server {
 		} else {
 			s.idmsSigner = signer
 		}
+		s.partnerIdMS = loadPartnerIdMS(cfg.IDMS.Partners)
 	}
 	return s
 }
