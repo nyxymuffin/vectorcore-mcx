@@ -63,6 +63,11 @@ func (s *Server) handleMessage(ctx context.Context, send responder, msg *Message
 		s.handleLocationMessage(ctx, send, msg, source)
 		return
 	}
+	// A regroup body creates or removes a temporary group (clause 16.2).
+	if regroupBody(msg) != "" {
+		s.handleRegroupMessage(ctx, send, msg, source)
+		return
+	}
 	slog.Info("SIP MESSAGE received (non-MCData)", "call_id", msg.Header("Call-ID"), "source", source)
 	s.respond(send, msg, 200, "OK", nil, nil)
 }

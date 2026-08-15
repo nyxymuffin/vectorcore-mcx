@@ -39,6 +39,7 @@ type Server struct {
 	xcapSubs           sync.Map // sub.CallID → store.Subscription, active xcap-diff subscriptions for change NOTIFY (RFC 5875)
 	emergencyAlerts    *alertState
 	confSubs           *conferenceSubs
+	regroups           *regroupState
 	pesSessions        sync.Map // callID → *pesSession, established pre-established sessions (TS 24.379 §8)
 	remoteInvites      sync.Map // original callID → *remoteInviteState, in-flight relayed INVITEs (CANCEL relay)
 	locationRequests   sync.Map // lower(target IMPU) → requester IMPU, pending on-demand location fetches (TS 24.379 §13.2.3.2)
@@ -126,6 +127,7 @@ func NewServer(cfg config.Config, st store.Store) *Server {
 		learned:         map[string]learnedRoute{},
 		emergencyAlerts: newAlertState(),
 		confSubs:        newConferenceSubs(),
+		regroups:        newRegroupState(),
 		udpSem:          make(chan struct{}, maxConcurrentUDPHandlers),
 		tcpSem:          make(chan struct{}, maxConcurrentTCPConns),
 	}
@@ -955,6 +957,13 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		// relay lookups have the correct group to work with.
 		groupURI = mcpttID
 	}
+	if groupURI == "" {
+		// A temporary group identity (TS 24.379 clause 16.2) need not look
+		// like a group URI, so an active regroup is matched explicitly.
+		if _, isTGI := s.regroups.get(strings.TrimSpace(msg.URI)); isTGI {
+			groupURI = strings.TrimSpace(msg.URI)
+		}
+	}
 	// TS 24.379 clause 17: an INVITE whose mcptt-info carries
 	// <session-type>adhoc</session-type> is an ad hoc group call; its
 	// membership comes from the request, not from group documents, so it takes
@@ -994,6 +1003,18 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		return
 	}
 
+	// A group fused into a regroup no longer takes calls of its own
+	// (TS 24.379 clause 10.1.1.4.2 / 10.1.2.4.1.1 step 4 c i).
+	if tgi, regrouped := s.regroups.regroupedInto(groupURI); regrouped {
+		slog.Info("MCPTT INVITE to a regrouped constituent refused",
+			"call_id", callID, "group_uri", groupURI, "tgi", tgi)
+		s.respond(send, msg, 403, "Forbidden",
+			[]header{s.mcpttWarning("148 group is regrouped")}, nil)
+		return
+	}
+	// A call on a temporary group identity spans the constituent groups.
+	regroupConstituents := s.regroupConstituents(groupURI)
+
 	// The controlling function of the target group decides admission
 	// (TS 24.379 clause 6.3.3); this participating side only relays the
 	// verdict. Resolution is per group so a remotely homed group binds to the
@@ -1014,7 +1035,18 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 		s.relayToRemoteControlling(ctx, send, msg, rc, call, localTag, transport)
 		return
 	}
-	if verdict := controlling.AdmitOriginatingCall(ctx, call); !verdict.Admitted {
+	if len(regroupConstituents) > 0 {
+		if verdict := s.admitRegroupInvite(ctx, initiatorURI, regroupConstituents); !verdict.Admitted {
+			slog.Warn("MCPTT regroup INVITE rejected", "call_id", callID,
+				"initiator", initiatorURI, "tgi", groupURI, "warning", verdict.Warning)
+			var extra []header
+			if verdict.Warning != "" {
+				extra = append(extra, s.mcpttWarning(verdict.Warning))
+			}
+			s.respond(send, msg, verdict.Status, verdict.Reason, extra, nil)
+			return
+		}
+	} else if verdict := controlling.AdmitOriginatingCall(ctx, call); !verdict.Admitted {
 		slog.Warn("MCPTT group INVITE rejected",
 			"call_id", callID,
 			"initiator", initiatorURI,
@@ -1190,7 +1222,12 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// document marks members <on-network-required>, which generated documents
 	// do not yet. A chat group has no fan-out: members join themselves
 	// (clause 10.1.2.4.1.1).
-	if groupURI != "" && !isChat {
+	switch {
+	case len(regroupConstituents) > 0:
+		// The regroup's members are the union of the constituent groups'
+		// affiliated members (clause 16.2 with 10.1.1.4.2 step 14 g v).
+		s.establishRegroupLegs(context.Background(), callID, groupURI, initiatorURI, regroupConstituents, sdpInfo)
+	case groupURI != "" && !isChat:
 		controlling.EstablishGroupLegs(call)
 	}
 
