@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"strings"
@@ -204,4 +205,38 @@ func (s *Server) authorizeServicePublish(msg *Message) (string, error) {
 		return "", fmt.Errorf("no access token in the PUBLISH body")
 	}
 	return s.authTokens.validate(token)
+}
+
+// mcpttIDFromThirdPartyRegister identifies the MCPTT ID from a third-party
+// REGISTER (TS 24.379 clause 7.3.2): the client's original REGISTER travels
+// in the message/sip MIME body, and its mcptt-info body carries the access
+// token whose mcptt_id claim is the identity to bind (clause 7.3.1A,
+// unprotected case). Returns empty when no binding can be made: absent body,
+// absent token, failed validation, or no validator configured - binding an
+// identity nobody authenticated would defeat the point of the procedure.
+func (s *Server) mcpttIDFromThirdPartyRegister(msg *Message) string {
+	part := msg.Part("message/sip")
+	if part == nil {
+		return ""
+	}
+	inner, err := Parse(part.Body)
+	if err != nil {
+		slog.Debug("third-party REGISTER inner request unparseable", "err", err)
+		return ""
+	}
+	token := accessTokenFromPublish(inner)
+	if token == "" {
+		slog.Debug("third-party REGISTER carried no access token; no MCPTT ID bound")
+		return ""
+	}
+	if s.authTokens == nil {
+		slog.Warn("third-party REGISTER carried an access token but sip.auth is not configured; refusing to bind an unvalidated identity")
+		return ""
+	}
+	mcpttID, err := s.authTokens.validate(token)
+	if err != nil {
+		slog.Warn("third-party REGISTER service authorization failed", "err", err)
+		return ""
+	}
+	return mcpttID
 }

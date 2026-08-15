@@ -76,6 +76,7 @@ func (c Config) validateIDMS() []error {
 // whichever component reads it.
 func (c Config) validateEnums() []error {
 	return []error{
+		oneOf("sip.mode", c.SIP.Mode, "standalone", "application_server"),
 		oneOf("sip.transport", c.SIP.Transport, "udp", "tcp"),
 		oneOf("sip.notify_route_set_order", c.SIP.NotifyRouteSetOrder, "preserve", "reverse"),
 		oneOf("media.direction", c.Media.Direction, "sendrecv", "recvonly", "sendonly", "inactive"),

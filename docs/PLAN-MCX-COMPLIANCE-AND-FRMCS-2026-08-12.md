@@ -284,6 +284,18 @@ literal Doubango-tuned multipart INVITE body (sip.go:973-1013); the unconditiona
 of 24.380 clause 6.4; and the outbound INVITE omitting the floor-control `m=` line. Do these first
 so the conformant implementations in 2a-2d are not built on top of them.
 
+**Phase 2a status: COMPLETE 2026-08-15.** All six slices of
+DESIGN-2A-INTERCONNECTION-ROLES.md delivered: client transactions (f2f47aa),
+role extraction with pinned wire behaviour (e5593c9), controlling-function
+conformance - affiliation admission, invite-before-answer ordering, session
+identity with isfocus, warning texts (8b8ec80), participating-function
+conformance - served-user check, answer-mode from published poc-settings
+(8244112), remote controlling binding over SIP with sip.remote_groups
+(e8fdea9), and sip.mode application_server with third-party REGISTER binding
+per clause 7.3.2. Deferred with clauses cited in the commits: TNG1/TNG3
+timers, RFC 4028 session supervision, media anchoring for relayed sessions,
+CANCEL relay, multiple-bindings/multiple-devices-ind.
+
 **2a. Interconnection roles** — controlling / participating / non-controlling. Prerequisite for
 IWF, GSM-R interworking, FRMCS interconnection and regroup. Also where `sip.mode:
 application_server` lands.

@@ -35,6 +35,13 @@ type APIConfig struct {
 }
 
 type SIPConfig struct {
+	// Mode selects the server's SIP posture. "standalone" (the default)
+	// terminates client REGISTERs directly, standing in for a SIP core so a
+	// lab without IMS works. "application_server" is the TS 23.280 posture:
+	// an AS behind a SIP core on ISC, consuming third-party REGISTERs whose
+	// message/sip body carries the client's original REGISTER (TS 24.379
+	// clause 7.3.2) and binding the MCPTT ID from its access token.
+	Mode                string        `yaml:"mode"`
 	UDPListen           string        `yaml:"udp_listen"`
 	TCPListen           string        `yaml:"tcp_listen"`
 	TLSListen           string        `yaml:"tls_listen"`
@@ -266,6 +273,10 @@ func (c *Config) applyDefaults() {
 		c.SIP.Transport = "udp"
 	}
 	c.SIP.Transport = strings.ToLower(c.SIP.Transport)
+	if c.SIP.Mode == "" {
+		c.SIP.Mode = "standalone"
+	}
+	c.SIP.Mode = strings.ToLower(strings.TrimSpace(c.SIP.Mode))
 	if c.SIP.NotifyRouteSetOrder == "" {
 		// RFC 3261 §12.2.1.1: use the route set in stored order (Record-Routes
 		// as received, top-to-bottom). This puts S-CSCF first and P-CSCF last,

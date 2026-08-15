@@ -9,6 +9,13 @@ api:
   listen: ":8080"
 
 sip:
+  # standalone: terminate client REGISTERs directly (no IMS core needed).
+  # application_server: the TS 23.280 posture - an AS behind a SIP core on
+  # ISC, consuming third-party REGISTERs and binding the MCPTT ID from the
+  # access token in the message/sip body (TS 24.379 clause 7.3.2). Binding
+  # requires sip.auth to be configured; standalone remains the default until
+  # an IMS core exists in the deployment.
+  mode: "standalone" # standalone | application_server
   udp_listen: ":5060"
   tcp_listen: ":5060"
   # SIP over TLS (RFC 3261 sips transport). Empty disables the listener.

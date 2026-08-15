@@ -585,9 +585,26 @@ func (s *Server) handleRegister(ctx context.Context, send responder, msg *Messag
 		return
 	}
 
+	// Application-server posture: the REGISTER arriving over ISC is the
+	// S-CSCF's third-party REGISTER, and the client's original REGISTER
+	// travels inside its message/sip MIME body (TS 24.379 clause 7.3.2).
+	// The MCPTT ID is identified from the access token in that inner
+	// request's mcptt-info body (clause 7.3.1A, unprotected case; XML
+	// integrity/confidentiality protection is KMS scope, carried forward)
+	// and bound to the IMS public user identity on success (step 4).
+	boundMCPTTID := ""
+	if s.cfg.SIP.Mode == "application_server" {
+		boundMCPTTID = s.mcpttIDFromThirdPartyRegister(msg)
+		if boundMCPTTID != "" {
+			slog.Info("MCPTT service authorization bound",
+				"public_identity", publicIdentity, "mcptt_id", boundMCPTTID)
+		}
+	}
+
 	sourceIP, sourcePort := splitAddr(source)
 	reg := store.Registration{
 		PublicIdentity:     publicIdentity,
+		MCPTTID:            boundMCPTTID,
 		IMSI:               imsiFromIdentity(publicIdentity),
 		ContactURI:         uriFromHeader(contactRaw),
 		ContactRaw:         contactRaw,
