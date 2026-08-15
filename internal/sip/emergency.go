@@ -2,6 +2,7 @@ package sip
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -73,6 +74,9 @@ func priorityRejectBody() (string, string) {
 type priorityState struct {
 	kind     string
 	deadline time.Time
+	// by is the MCPTT ID that put the group into the state - cancellation
+	// authorisation (clause 6.3.3.1.13.4) is keyed on it.
+	by string
 }
 
 // groupPriorityState returns the in-progress emergency/imminent-peril state
@@ -94,18 +98,37 @@ func (s *Server) groupPriorityState(groupURI string) string {
 }
 
 func (s *Server) setGroupPriorityState(groupURI, state string) {
+	s.setGroupPriorityStateBy(groupURI, state, "")
+}
+
+func (s *Server) setGroupPriorityStateBy(groupURI, state, by string) {
 	key := strings.ToLower(strings.TrimSpace(groupURI))
 	if state == "" {
 		s.inProgressPriority.Delete(key)
 		return
 	}
-	st := priorityState{kind: state}
+	st := priorityState{kind: state, by: strings.TrimSpace(by)}
 	if state == "emergency" {
 		if limit := s.cfg.SIP.Emergency.GroupTimeLimitSeconds; limit > 0 {
 			st.deadline = time.Now().UTC().Add(time.Duration(limit) * time.Second)
 		}
 	}
 	s.inProgressPriority.Store(key, st)
+}
+
+// groupPriorityStateBy returns the state kind and the MCPTT ID that set it.
+func (s *Server) groupPriorityStateBy(groupURI string) (string, string) {
+	key := strings.ToLower(strings.TrimSpace(groupURI))
+	v, ok := s.inProgressPriority.Load(key)
+	if !ok {
+		return "", ""
+	}
+	st := v.(priorityState)
+	if !st.deadline.IsZero() && time.Now().UTC().After(st.deadline) {
+		s.inProgressPriority.Delete(key)
+		return "", ""
+	}
+	return st.kind, st.by
 }
 
 // resourcePriorityFor returns the Resource-Priority value the controlling
@@ -121,4 +144,158 @@ func (s *Server) resourcePriorityFor(groupURI string) string {
 	default:
 		return ""
 	}
+}
+
+// notifyGroupPriorityChange sends the clause 6.3.3.1.11 MESSAGE to every
+// affiliated registered member other than the originator, carrying the given
+// priority indicator element and value.
+func (s *Server) notifyGroupPriorityChange(ctx context.Context, group *store.Group, groupURI, originator, element string, value bool) {
+	if group == nil {
+		return
+	}
+	users, err := s.st.ListUsers(ctx)
+	if err != nil {
+		return
+	}
+	memberships, err := s.st.ListGroupMemberships(ctx)
+	if err != nil {
+		return
+	}
+	userByID := map[string]store.User{}
+	for _, u := range users {
+		userByID[u.ID] = u
+	}
+	for _, m := range memberships {
+		if m.GroupID != group.ID {
+			continue
+		}
+		user, ok := userByID[m.UserID]
+		if !ok || !user.Enabled {
+			continue
+		}
+		if affiliated, _ := s.st.IsGroupAffiliated(ctx, m.UserID, group.ID); !affiliated {
+			continue
+		}
+		impu := strings.TrimSpace(user.IMPU)
+		if impu == "" {
+			impu = strings.TrimSpace(user.MCPTTID)
+		}
+		if impu == "" || strings.EqualFold(impu, strings.TrimSpace(originator)) {
+			continue
+		}
+		body := fmt.Sprintf(
+			`<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params>`+
+				`<mcptt-request-uri><mcpttURI>%s</mcpttURI></mcptt-request-uri>`+
+				`<mcptt-calling-user-id><mcpttURI>%s</mcpttURI></mcptt-calling-user-id>`+
+				`<mcptt-calling-group-id><mcpttURI>%s</mcpttURI></mcptt-calling-group-id>`+
+				`<%s>%t</%s>`+
+				`</mcptt-Params></mcpttinfo>`,
+			impu, originator, groupURI, element, value, element)
+		s.sendMcpttMessage(ctx, impu, body)
+	}
+}
+
+// handlePriorityReInvite applies TS 24.379 clause 10.1.2.4.1.2 (and its
+// prearranged sibling) to an in-dialog re-INVITE carrying <emergency-ind> or
+// <imminentperil-ind>. It answers the request entirely when it returns true.
+func (s *Server) handlePriorityReInvite(ctx context.Context, send responder, msg *Message) bool {
+	info := mcpttInfoOf(msg)
+	if info == "" ||
+		(!strings.Contains(info, "<emergency-ind>") && !strings.Contains(info, "<imminentperil-ind>")) {
+		return false
+	}
+	callID := msg.Header("Call-ID")
+	call, err := s.st.GetCall(ctx, callID)
+	if err != nil || call == nil {
+		return false
+	}
+	groupURI := strings.TrimSpace(call.GroupURI)
+	group := s.groupByURI(ctx, groupURI)
+	initiator := identityFrom(msg)
+
+	emergencyPresent := strings.Contains(info, "<emergency-ind>")
+	emergencyTrue := mcpttInfoFlagTrue(msg, "emergency-ind")
+	imminentPresent := strings.Contains(info, "<imminentperil-ind>")
+	imminentTrue := mcpttInfoFlagTrue(msg, "imminentperil-ind")
+
+	authorised := s.emergencyCallAuthorised(ctx, initiator, group)
+
+	switch {
+	case emergencyPresent && emergencyTrue:
+		// Steps 3-4: upgrade to an emergency call.
+		if !authorised {
+			body, contentType := priorityRejectBody()
+			s.respond(send, msg, 403, "Forbidden",
+				[]header{{"Content-Type", contentType}}, []byte(body))
+			return true
+		}
+		s.setGroupPriorityStateBy(groupURI, "emergency", initiator)
+		s.notifyGroupPriorityChange(ctx, group, groupURI, initiator, "emergency-ind", true)
+		slog.Info("MCPTT call upgraded to emergency", "call_id", callID, "group_uri", groupURI, "by", initiator)
+
+	case emergencyPresent && !emergencyTrue:
+		// Steps 5-6: cancellation. Authorised when the requester put the
+		// group into the state (clause 6.3.3.1.13.4 stand-in).
+		kind, by := s.groupPriorityStateBy(groupURI)
+		if kind != "emergency" {
+			return false // nothing to cancel; treat as a plain re-INVITE
+		}
+		if by != "" && !strings.EqualFold(by, strings.TrimSpace(initiator)) {
+			body := `<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params>` +
+				`<emergency-ind>true</emergency-ind></mcptt-Params></mcpttinfo>`
+			s.respond(send, msg, 403, "Forbidden",
+				[]header{{"Content-Type", "application/vnd.3gpp.mcptt-info+xml"}}, []byte(body))
+			return true
+		}
+		s.setGroupPriorityState(groupURI, "")
+		s.notifyGroupPriorityChange(ctx, group, groupURI, initiator, "emergency-ind", false)
+		slog.Info("MCPTT in-progress emergency cancelled", "call_id", callID, "group_uri", groupURI, "by", initiator)
+
+	case imminentPresent && imminentTrue:
+		if !authorised {
+			body, contentType := priorityRejectBody()
+			s.respond(send, msg, 403, "Forbidden",
+				[]header{{"Content-Type", contentType}}, []byte(body))
+			return true
+		}
+		if s.groupPriorityState(groupURI) != "emergency" {
+			s.setGroupPriorityStateBy(groupURI, "imminent", initiator)
+			s.notifyGroupPriorityChange(ctx, group, groupURI, initiator, "imminentperil-ind", true)
+			slog.Info("MCPTT call upgraded to imminent peril", "call_id", callID, "group_uri", groupURI, "by", initiator)
+		}
+
+	case imminentPresent && !imminentTrue:
+		kind, by := s.groupPriorityStateBy(groupURI)
+		if kind != "imminent" {
+			return false
+		}
+		if by != "" && !strings.EqualFold(by, strings.TrimSpace(initiator)) {
+			s.respond(send, msg, 403, "Forbidden", nil, nil)
+			return true
+		}
+		s.setGroupPriorityState(groupURI, "")
+		s.notifyGroupPriorityChange(ctx, group, groupURI, initiator, "imminentperil-ind", false)
+		slog.Info("MCPTT in-progress imminent peril cancelled", "call_id", callID, "group_uri", groupURI, "by", initiator)
+	default:
+		return false
+	}
+
+	// The re-INVITE itself is answered like a session refresh (SDP answer,
+	// Session-Expires) with the state change applied and the current
+	// Resource-Priority reflected.
+	s.markSessionAnswered(ctx, callID)
+	body, contentType := s.sdpAnswer(msg)
+	headers := []header{
+		{"Allow", allowValue},
+		{"Session-Expires", sessionExpiresHeader},
+		{"Require", "timer"},
+	}
+	if rp := s.resourcePriorityFor(groupURI); rp != "" {
+		headers = append(headers, header{"Resource-Priority", rp})
+	}
+	if contentType != "" {
+		headers = append(headers, header{"Content-Type", contentType})
+	}
+	s.respond(send, msg, 200, "OK", headers, body)
+	return true
 }

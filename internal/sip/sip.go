@@ -1363,6 +1363,12 @@ func (s *Server) handleInDialogRequest(ctx context.Context, send responder, msg 
 	// session refresh - the response repeats Session-Expires and the
 	// supervision clock restarts (TS 24.379 clause 6.3.3.2.3.2 item 6).
 	refresh := strings.EqualFold(msg.Method, "INVITE") || strings.EqualFold(msg.Method, "UPDATE")
+	// An in-dialog re-INVITE carrying a priority indication upgrades or
+	// cancels the call's emergency/imminent peril state (TS 24.379 clause
+	// 10.1.2.4.1.2 and siblings).
+	if strings.EqualFold(msg.Method, "INVITE") && s.handlePriorityReInvite(ctx, send, msg) {
+		return
+	}
 	if refresh {
 		s.markSessionAnswered(ctx, callID)
 	}

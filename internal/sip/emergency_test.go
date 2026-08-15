@@ -240,3 +240,90 @@ func TestTNG2DisabledKeepsEmergencyState(t *testing.T) {
 		t.Fatalf("state = %q, want emergency to persist without TNG2", got)
 	}
 }
+
+// An in-dialog re-INVITE with emergency-ind true upgrades the call (clause
+// 10.1.2.4.1.2 step 4); the initiator's cancellation (step 6) clears it and
+// a third party's cancellation is refused (step 5).
+func TestPriorityReInviteUpgradeAndCancel(t *testing.T) {
+	s, st := groupCallFixture(t)
+	allowEmergency(t, st, true, true)
+
+	responses := collectResponses(t, s, snapshotGroupInvite("reinv-1"))
+	if len(responses) != 3 {
+		t.Fatalf("call setup: %v", responses)
+	}
+	toTag := tagFromResponse(responses[2])
+
+	reInvite := func(callID, from, ind, value string) string {
+		info := `<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params>` +
+			`<` + ind + `>` + value + `</` + ind + `>` +
+			`</mcptt-Params></mcpttinfo>`
+		return "INVITE sip:mcptt-as@example.test SIP/2.0\r\n" +
+			"Via: SIP/2.0/UDP 192.0.2.52:5060;branch=z9hG4bKri" + callID + value + fmt.Sprint(len(from)) + "\r\n" +
+			"From: <" + from + ">;tag=from1\r\n" +
+			"To: <sip:test_group@example.test>;tag=" + toTag + "\r\n" +
+			"Call-ID: " + callID + "\r\n" +
+			"CSeq: 3 INVITE\r\n" +
+			"Content-Type: application/vnd.3gpp.mcptt-info+xml\r\n" +
+			"Content-Length: " + fmt.Sprint(len(info)) + "\r\n\r\n" + info
+	}
+
+	// Upgrade.
+	up := collectResponses(t, s, reInvite("reinv-1", "sip:caller@example.test", "emergency-ind", "true"))
+	if len(up) != 1 || !strings.HasPrefix(up[0], "SIP/2.0 200") {
+		t.Fatalf("upgrade responses = %v, want 200", up)
+	}
+	if !strings.Contains(up[0], "Resource-Priority: mcptt.0") {
+		t.Fatalf("upgrade 200 lacks the emergency Resource-Priority:\n%s", up[0])
+	}
+	if got := s.groupPriorityState("sip:test_group@example.test"); got != "emergency" {
+		t.Fatalf("state = %q, want emergency", got)
+	}
+
+	// A third party cannot cancel the initiator's emergency.
+	third := collectResponses(t, s, reInvite("reinv-1", "sip:someoneelse@example.test", "emergency-ind", "false"))
+	if len(third) != 1 || !strings.HasPrefix(third[0], "SIP/2.0 403") {
+		t.Fatalf("third-party cancel = %v, want 403", third)
+	}
+	if !strings.Contains(third[0], "<emergency-ind>true</emergency-ind>") {
+		t.Fatalf("cancel refusal lacks the still-true indication:\n%s", third[0])
+	}
+
+	// The initiator cancels.
+	down := collectResponses(t, s, reInvite("reinv-1", "sip:caller@example.test", "emergency-ind", "false"))
+	if len(down) != 1 || !strings.HasPrefix(down[0], "SIP/2.0 200") {
+		t.Fatalf("cancel responses = %v, want 200", down)
+	}
+	if got := s.groupPriorityState("sip:test_group@example.test"); got != "" {
+		t.Fatalf("state = %q, want cleared", got)
+	}
+}
+
+// An unauthorised upgrade is refused with the clause 6.3.3.1.14 body.
+func TestPriorityReInviteUnauthorised(t *testing.T) {
+	s, st := groupCallFixture(t)
+	allowEmergency(t, st, false, false)
+
+	responses := collectResponses(t, s, snapshotGroupInvite("reinv-2"))
+	if len(responses) != 3 {
+		t.Fatalf("call setup: %v", responses)
+	}
+	toTag := tagFromResponse(responses[2])
+	info := `<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params>` +
+		`<emergency-ind>true</emergency-ind></mcptt-Params></mcpttinfo>`
+	raw := "INVITE sip:mcptt-as@example.test SIP/2.0\r\n" +
+		"Via: SIP/2.0/UDP 192.0.2.52:5060;branch=z9hG4bKri403\r\n" +
+		"From: <sip:caller@example.test>;tag=from1\r\n" +
+		"To: <sip:test_group@example.test>;tag=" + toTag + "\r\n" +
+		"Call-ID: reinv-2\r\n" +
+		"CSeq: 3 INVITE\r\n" +
+		"Content-Type: application/vnd.3gpp.mcptt-info+xml\r\n" +
+		"Content-Length: " + fmt.Sprint(len(info)) + "\r\n\r\n" + info
+	up := collectResponses(t, s, raw)
+	if len(up) != 1 || !strings.HasPrefix(up[0], "SIP/2.0 403") {
+		t.Fatalf("responses = %v, want 403", up)
+	}
+	if !strings.Contains(up[0], "<emergency-ind>false</emergency-ind>") {
+		t.Fatalf("403 lacks the negated indication:\n%s", up[0])
+	}
+}
