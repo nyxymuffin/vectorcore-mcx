@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/svinson1121/vectorcore-mcx/internal/store"
 )
@@ -107,8 +108,16 @@ func (s *Server) handleMcdataSDS(ctx context.Context, send responder, msg *Messa
 		return
 	}
 
+	// Clause 15: decode the signalling head so the transmission can be
+	// correlated with the disposition notifications it will produce
+	// (clause 12.2.3 step 4).
+	var correlation string
+	if sig, ok := parseMcdataSignalling(msg.Part(ctMcdataSignalling).Body); ok {
+		correlation = sig.correlationKey()
+	}
+
 	slog.Info("MCData SDS MESSAGE", "call_id", callID, "initiator", initiatorURI,
-		"request_type", requestType, "source", source)
+		"request_type", requestType, "correlation", correlation, "source", source)
 
 	switch requestType {
 	case "one-to-one-sds":
@@ -190,6 +199,14 @@ func (s *Server) handleMcdataSDS(ctx context.Context, send responder, msg *Messa
 		s.respond(send, msg, 403, "Forbidden",
 			[]header{s.mcpttWarning("199 expected MIME bodies not in the request")}, nil)
 		return
+	}
+
+	if correlation != "" {
+		s.sdsCorrelation.remember(correlation, sdsTransmission{
+			originator: initiatorURI,
+			group:      mcdataURIFrom(info, "mcdata-request-uri"),
+			at:         time.Now().UTC(),
+		})
 	}
 
 	// Steps 7-8: 202 (Accepted) toward the originator.
@@ -359,8 +376,34 @@ func (s *Server) handleMcdataDisposition(ctx context.Context, send responder, ms
 		return
 	}
 	target := strings.TrimSpace(entries[0])
+
+	// Steps 4-5: correlate the notification to the original SDS through the
+	// Conversation ID and Message ID of the clause 15 signalling message;
+	// what cannot be correlated is refused with warning 216.
+	sig, decoded := parseMcdataSignalling(msg.Part(ctMcdataSignalling).Body)
+	if !decoded {
+		s.respond(send, msg, 403, "Forbidden",
+			[]header{s.mcpttWarning("216 unable to correlate the disposition notification")}, nil)
+		return
+	}
+	tx, correlated := s.sdsCorrelation.lookup(sig.correlationKey())
+	if !correlated {
+		slog.Warn("MCData disposition could not be correlated",
+			"conversation_id", sig.ConversationID, "message_id", sig.MessageID)
+		s.respond(send, msg, 403, "Forbidden",
+			[]header{s.mcpttWarning("216 unable to correlate the disposition notification")}, nil)
+		return
+	}
+	// The notification belongs to the remembered originator; the listed
+	// entry must agree with it.
+	if tx.originator != "" && !strings.EqualFold(strings.TrimSpace(tx.originator), target) {
+		slog.Info("MCData disposition target corrected from correlation",
+			"listed", target, "originator", tx.originator)
+		target = strings.TrimSpace(tx.originator)
+	}
 	slog.Info("MCData disposition notification", "target", target,
-		"from", identityFrom(msg), "source", source)
+		"from", identityFrom(msg), "disposition", dispositionTypeName(sig.NotificationType),
+		"conversation_id", sig.ConversationID, "message_id", sig.MessageID, "source", source)
 
 	info := mcdataInfoBody(msg)
 	info = setXMLURIElement(info, "mcdata-request-uri", target)

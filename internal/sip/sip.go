@@ -40,6 +40,7 @@ type Server struct {
 	emergencyAlerts    *alertState
 	confSubs           *conferenceSubs
 	regroups           *regroupState
+	sdsCorrelation     *sdsCorrelator
 	pesSessions        sync.Map // callID → *pesSession, established pre-established sessions (TS 24.379 §8)
 	remoteInvites      sync.Map // original callID → *remoteInviteState, in-flight relayed INVITEs (CANCEL relay)
 	locationRequests   sync.Map // lower(target IMPU) → requester IMPU, pending on-demand location fetches (TS 24.379 §13.2.3.2)
@@ -128,6 +129,7 @@ func NewServer(cfg config.Config, st store.Store) *Server {
 		emergencyAlerts: newAlertState(),
 		confSubs:        newConferenceSubs(),
 		regroups:        newRegroupState(),
+		sdsCorrelation:  newSDSCorrelator(),
 		udpSem:          make(chan struct{}, maxConcurrentUDPHandlers),
 		tcpSem:          make(chan struct{}, maxConcurrentTCPConns),
 	}

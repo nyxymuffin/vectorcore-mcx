@@ -229,35 +229,33 @@ func TestDispositionNotificationForwarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	sock := registerAtSocket(t, st, "sip:orig@example.test")
+	_ = registerAtSocket(t, st, "sip:peer@example.test")
+	if _, err := st.CreateUser(ctx, store.User{
+		IMPU: "sip:peer@example.test", MCPTTID: "sip:peer@example.test", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	info := `<mcdatainfo xmlns="urn:3gpp:ns:mcdataInfo:1.0"><mcdata-Params></mcdata-Params></mcdatainfo>`
-	lists := `<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists"><list><entry uri="sip:orig@example.test"/></list></resource-lists>`
-	body := "--d\r\nContent-Type: application/vnd.3gpp.mcdata-info+xml\r\n\r\n" + info +
-		"\r\n--d\r\nContent-Type: application/vnd.3gpp.mcdata-signalling\r\n\r\nSDS-NOTIFICATION-DELIVERED" +
-		"\r\n--d\r\nContent-Type: application/resource-lists+xml\r\n\r\n" + lists +
-		"\r\n--d--\r\n"
-	raw := "MESSAGE sip:mcdata-as@example.test SIP/2.0\r\n" +
-		"Via: SIP/2.0/UDP 192.0.2.52:5060;branch=z9hG4bKdisp1\r\n" +
-		"From: <sip:caller@example.test>;tag=d1\r\n" +
-		"To: <sip:mcdata-as@example.test>\r\n" +
-		"Call-ID: disp-1\r\n" +
-		"CSeq: 1 MESSAGE\r\n" +
-		`Content-Type: multipart/mixed;boundary="d"` + "\r\n" +
-		"Content-Length: " + fmt.Sprint(len(body)) + "\r\n\r\n" + body
-	responses := collectResponses(t, s, raw)
+	// The disposition must correlate to a transmission (clause 12.2.3 step
+	// 4), so the SDS is sent first from the user the notification names.
+	conversation, message := testIDs()
+	sds := strings.ReplaceAll(sdsWithSignalling("disp-sds", buildSDSSignalling(conversation, message)),
+		"sip:caller@example.test", "sip:orig@example.test")
+	if r := collectResponses(t, s, sds); len(r) != 1 || !strings.HasPrefix(r[0], "SIP/2.0 202") {
+		t.Fatalf("priming SDS = %v, want 202", r)
+	}
+
+	responses := collectResponses(t, s,
+		dispositionMessage("disp-1", buildSDSNotification(mcdataDispositionDelivered, conversation, message)))
 	if len(responses) != 1 || !strings.HasPrefix(responses[0], "SIP/2.0 200") {
 		t.Fatalf("responses = %v, want 200", responses)
 	}
 
-	buf := make([]byte, 8192)
-	_ = sock.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, _, err := sock.ReadFrom(buf)
+	fwd, err := readDatagram(sock)
 	if err != nil {
 		t.Fatalf("disposition never forwarded: %v", err)
 	}
-	fwd := string(buf[:n])
 	for _, want := range []string{
-		"SDS-NOTIFICATION-DELIVERED",
 		"<mcdata-request-uri><mcdataURI>sip:orig@example.test</mcdataURI></mcdata-request-uri>",
 		"P-Asserted-Service: urn:urn-7:3gpp-service.ims.icsi.mcdata.sds",
 	} {
