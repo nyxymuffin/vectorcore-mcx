@@ -36,3 +36,12 @@ between 172.16.x and 172.25.x began resetting/refusing connections mid-run;
 a detached `make check-race` was launched there but its completion is
 unverified, log at /tmp/race.log). Local `mingw32-make check-race` was green
 for every commit.
+
+## Morning session (supervision phase, one slice at a time)
+
+| Commit | Scope |
+|---|---|
+| 07e4a40 | RFC 4028 session timer supervision: refresh handling on re-INVITE/UPDATE, reaper BYEs both directions |
+| 404cfab | TNG3 group call timer (group max_duration_seconds / <on-network-maximum-duration>) + private and ad hoc call duration timers |
+| bb82c38 | TNG2 in-progress emergency group call timer (sip.emergency.group_time_limit_seconds, advertised as <group-time-limit>) |
+| 0f3d012 | Floor timer T1 (End of RTP media): silent talkers lose the floor; media.floor_t1_seconds |

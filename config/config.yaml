@@ -66,6 +66,20 @@ sip:
     # Maximum participants per ad hoc call (403 with warning "189" when
     # exceeded); 0 means no limit.
     max_participants: 0
+    # Ad hoc group call timer (TS 24.379 clause 17.4.2.2 step 13): the call
+    # is released after this many seconds. 0 disables.
+    max_call_duration_seconds: 0
+  private_call:
+    # Max private call duration (TS 24.379 clause 11.1.1.4.1 step 10); the
+    # call is released after this many seconds. 0 disables.
+    max_duration_seconds: 0
+  emergency:
+    # TNG2, the in-progress emergency group call timer (TS 24.379 clause
+    # 6.3.3.1.16): the group's emergency state returns to normal after this
+    # many seconds. Also advertised as <group-time-limit> in the generated
+    # service configuration. 0 disables (the state then persists until the
+    # group's last leg ends).
+    group_time_limit_seconds: 300
 
 cms:
   enabled: true
@@ -87,6 +101,11 @@ media:
   floor_control_port: 40002
   floor_auto_grant: true
   floor_grant_duration_seconds: 30
+  # Timer T1 "End of RTP media" (TS 24.380 clause 6.3.4.4.3): a granted
+  # talker silent for this many seconds loses the floor. Matches the
+  # <T1-end-of-rtp-media> advertised in the generated service configuration.
+  # -1 disables the sweep.
+  floor_t1_seconds: 5
   log_packets: false
   log_packet_interval: 100
 
