@@ -181,10 +181,16 @@ func accessTokenFromPublish(msg *Message) string {
 	return ""
 }
 
+// mcpttWarning builds a Warning header carrying a TS 24.379 clause 4.4.2
+// warning text, e.g. "120 user is not affiliated to this group".
+func (s *Server) mcpttWarning(text string) header {
+	return header{"Warning", fmt.Sprintf("399 %s %q", advertiseHostOnly(s.cfg), text)}
+}
+
 // serviceAuthWarning is the Warning header of TS 24.379 clause 4.4.2 for a
 // failed service authorization.
 func (s *Server) serviceAuthWarning() header {
-	return header{"Warning", fmt.Sprintf("399 %s \"101 service authorisation failed\"", advertiseHostOnly(s.cfg))}
+	return s.mcpttWarning("101 service authorisation failed")
 }
 
 // authorizeServicePublish validates the access token of a service

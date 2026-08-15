@@ -650,8 +650,8 @@ func TestInviteLifecycleTracksCallState(t *testing.T) {
 	if len(inviteResponses) != 3 {
 		t.Fatalf("responses = %d, want 3", len(inviteResponses))
 	}
-	if !strings.Contains(inviteResponses[2], "Contact: <sip:192.0.2.11:5060;transport=udp>") {
-		t.Fatalf("200 OK missing advertised Contact:\n%s", inviteResponses[2])
+	if !strings.Contains(inviteResponses[2], "Contact: <sip:mcptt-session-") || !strings.Contains(inviteResponses[2], ";isfocus") {
+		t.Fatalf("200 OK missing MCPTT session identity Contact with isfocus:\n%s", inviteResponses[2])
 	}
 	if !strings.Contains(inviteResponses[2], "Record-Route: <sip:192.0.2.11:5060;transport=udp;lr>") {
 		t.Fatalf("200 OK missing Record-Route:\n%s", inviteResponses[2])
@@ -747,6 +747,9 @@ func TestGroupInviteRequiresMembership(t *testing.T) {
 	if _, err := st.CreateGroupMembership(ctx, store.GroupMembership{UserID: user.ID, GroupID: memberGroup.ID, Role: "MCPTT User"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.CreateGroupAffiliation(ctx, store.GroupAffiliation{UserID: user.ID, GroupID: memberGroup.ID, State: "affiliated"}); err != nil {
+		t.Fatal(err)
+	}
 
 	s := NewServer(config.Default(), st)
 	var rejected []string
@@ -756,6 +759,9 @@ func TestGroupInviteRequiresMembership(t *testing.T) {
 	})
 	if len(rejected) != 1 || !strings.Contains(rejected[0], "SIP/2.0 403 Forbidden") {
 		t.Fatalf("reject responses = %#v", rejected)
+	}
+	if !strings.Contains(rejected[0], `"120 user is not affiliated to this group"`) {
+		t.Fatalf("rejection lacks the clause 4.4.2 warning text:\n%s", rejected[0])
 	}
 	call, err := st.GetCall(ctx, "group-reject")
 	if err != nil {

@@ -65,6 +65,12 @@ func groupCallFixture(t *testing.T) (*Server, *sqlite.Store) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Admission is by affiliation (TS 24.379 clause 10.1.1.4.2 step 14 a).
+	if _, err := st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
+		UserID: caller.ID, GroupID: group.ID, State: "affiliated",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	return s, st
 }
 
@@ -127,7 +133,17 @@ func TestGroupInviteWireExchangeForMember(t *testing.T) {
 		"Call-ID: snap-accept-1\r\n",
 		"CSeq: 1 INVITE\r\n",
 		"Record-Route: <sip:",
-		"Contact: <sip:",
+		// Clause 6.3.3.2.3.2: the Contact carries the MCPTT session identity
+		// with isfocus and the MCPTT feature tags; the PSI is asserted; the
+		// session timer is offered with the client as refresher.
+		"Contact: <sip:mcptt-session-",
+		";isfocus",
+		"+g.3gpp.mcptt",
+		`+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt"`,
+		"P-Asserted-Identity: <sip:mcptt-as@",
+		"Session-Expires: 1800;refresher=uac\r\n",
+		"Require: timer\r\n",
+		"Supported: tdialog, norefersub, explicitsub, nosub\r\n",
 		"Content-Type: application/sdp\r\n",
 		"m=audio 40000 RTP/AVP 0\r\n",
 		"m=application 40002 udp MCPTT\r\n",
@@ -179,6 +195,11 @@ func TestGroupInviteFansOutRXInviteToMember(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.CreateGroupAffiliation(ctx, store.GroupAffiliation{
+		UserID: member.ID, GroupID: groups[0].ID, State: "affiliated",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	capture, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -201,18 +222,33 @@ func TestGroupInviteFansOutRXInviteToMember(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	responses := collectResponses(t, s, snapshotGroupInvite("snap-fanout-1"))
+	// TS 24.379 clause 10.1.1.4.2 step 14 g v: members are invited before the
+	// originating leg's final response. The read below runs inside the
+	// responder at the moment the 200 is emitted, so it proves the member's
+	// INVITE was already on the wire.
+	var rx string
+	var rxErr error
+	var responses []string
+	s.handleRaw(context.Background(), "192.0.2.52:5060", "udp", []byte(snapshotGroupInvite("snap-fanout-1")), func(b []byte) error {
+		responses = append(responses, string(b))
+		if strings.HasPrefix(string(b), "SIP/2.0 200") && rx == "" {
+			_ = capture.SetReadDeadline(time.Now().Add(2 * time.Second))
+			buf := make([]byte, 8192)
+			n, _, err := capture.ReadFrom(buf)
+			if err != nil {
+				rxErr = err
+				return nil
+			}
+			rx = normalizeWire(string(buf[:n]))
+		}
+		return nil
+	})
 	if len(responses) != 3 {
 		t.Fatalf("inbound leg got %d responses, want 3", len(responses))
 	}
-
-	_ = capture.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 8192)
-	n, _, err := capture.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("RX INVITE never arrived at the member: %v", err)
+	if rxErr != nil {
+		t.Fatalf("RX INVITE was not on the wire by the time the 200 was sent: %v", rxErr)
 	}
-	rx := normalizeWire(string(buf[:n]))
 
 	for _, want := range []string{
 		"INVITE sip:member2@example.test SIP/2.0",

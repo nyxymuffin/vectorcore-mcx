@@ -29,11 +29,13 @@ type originatingGroupCall struct {
 }
 
 // admissionVerdict is the controlling function's decision on an originating
-// leg. Status and Reason are meaningful only when Admitted is false.
+// leg. Status, Reason and Warning are meaningful only when Admitted is false;
+// Warning carries the TS 24.379 clause 4.4.2 warning text for the response.
 type admissionVerdict struct {
 	Admitted bool
 	Status   int
 	Reason   string
+	Warning  string
 }
 
 // controllingFunction is the seam toward the controlling role of one group.
@@ -68,15 +70,16 @@ type localControlling struct {
 }
 
 func (c localControlling) AdmitOriginatingCall(ctx context.Context, call originatingGroupCall) admissionVerdict {
-	ok, status, reason := c.s.admitGroupInvite(ctx, call.InitiatorURI, call.GroupURI)
-	return admissionVerdict{Admitted: ok, Status: status, Reason: reason}
+	return c.s.admitGroupInvite(ctx, call.InitiatorURI, call.GroupURI)
 }
 
 func (c localControlling) EstablishGroupLegs(call originatingGroupCall) {
-	// Detached from the originating leg's context on purpose: this preserves
-	// the pre-split behaviour, where member legs outlive the inbound
-	// handler's lifetime.
-	go c.s.sendGroupCallNotifications(context.Background(), call.CallID, call.GroupURI, call.InitiatorURI, call.SDP)
+	// Synchronous through the initial sends: TS 24.379 clause 10.1.1.4.2
+	// step 14 g v invites the members before the originating leg's final
+	// response, so the caller answers the originator only once every member
+	// INVITE is on the wire. Each leg's response handling detaches inside
+	// sendRXInvite; the store context is independent of the inbound handler.
+	c.s.sendGroupCallNotifications(context.Background(), call.CallID, call.GroupURI, call.InitiatorURI, call.SDP)
 }
 
 func (c localControlling) ReleaseGroupLegs(groupURI, callID string) {

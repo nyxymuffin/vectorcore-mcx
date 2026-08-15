@@ -52,8 +52,12 @@ type Server struct {
 	// for the same reason as streamReadTimeoutOverride.
 	clientTx        sync.Map
 	timerT1Override time.Duration
-	udpDropped      atomic.Uint64
-	tcpRefused      atomic.Uint64
+
+	// sessionIdentities maps Call-ID to the allocated MCPTT session identity
+	// (TS 24.379 clause 4.5) for the lifetime of the group session.
+	sessionIdentities sync.Map
+	udpDropped        atomic.Uint64
+	tcpRefused        atomic.Uint64
 }
 
 // Bounds on concurrent work started by the listeners. Every handler can open a
@@ -749,8 +753,13 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 			"group_uri", groupURI,
 			"status", verdict.Status,
 			"reason", verdict.Reason,
+			"warning", verdict.Warning,
 		)
-		s.respond(send, msg, verdict.Status, verdict.Reason, nil, nil)
+		var extra []header
+		if verdict.Warning != "" {
+			extra = append(extra, s.mcpttWarning(verdict.Warning))
+		}
+		s.respond(send, msg, verdict.Status, verdict.Reason, extra, nil)
 		return
 	}
 	if _, err := s.st.CreateDialog(ctx, store.Dialog{
@@ -840,8 +849,29 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 			slog.Info("MCPTT floor granted by SDP", "call_id", callID)
 		}
 	}
+	// TS 24.379 clause 10.1.1.4.2 step 14 g v: the controlling function
+	// invites the group members before answering the originating leg. This is
+	// the unacknowledged flow; the acknowledged variant (TNG1, clause 6.3.3.3)
+	// waits for required members' answers and arises only when the group
+	// document marks members <on-network-required>, which generated documents
+	// do not yet.
+	if groupURI != "" {
+		controlling.EstablishGroupLegs(call)
+	}
+
+	// SIP 200 (OK) per clause 6.3.3.2.3.2: the Contact carries the MCPTT
+	// session identity (clause 4.5) with the isfocus, g.3gpp.mcptt and
+	// g.3gpp.icsi-ref feature tags; P-Asserted-Identity is the controlling
+	// function's public service identity; Session-Expires with refresher=uac
+	// and the timer option tag per RFC 4028; tdialog, norefersub, explicitsub
+	// and nosub advertised per items 8-10.
+	sessionURI := s.allocateSessionIdentity(callID)
 	headers := []header{
-		{"Contact", fmt.Sprintf("<%s>", contactURI)},
+		{"Contact", fmt.Sprintf("<%s>;+g.3gpp.mcptt;+g.3gpp.icsi-ref=\"urn%%3Aurn-7%%3A3gpp-service.ims.icsi.mcptt\";isfocus", sessionURI)},
+		{"P-Asserted-Identity", fmt.Sprintf("<%s>", s.cfg.MCX.SIPIdentity)},
+		{"Session-Expires", "1800;refresher=uac"},
+		{"Require", "timer"},
+		{"Supported", "tdialog, norefersub, explicitsub, nosub"},
 		{"Allow", allowValue},
 	}
 	headers = append(recordRouteHeaders(recordRoute, msg.HeadersFor("Record-Route")), headers...)
@@ -851,11 +881,6 @@ func (s *Server) handleInvite(ctx context.Context, send responder, msg *Message,
 	// Final response committed — CANCEL can no longer trigger a 487.
 	s.uasInvites.Delete(callID)
 	s.respondTagged(send, msg, 200, "OK", localTag, headers, body)
-
-	// The controlling function establishes the other participants' legs.
-	if groupURI != "" {
-		controlling.EstablishGroupLegs(call)
-	}
 }
 
 func (s *Server) handleACK(ctx context.Context, msg *Message, source, transport string) {
@@ -1105,7 +1130,7 @@ func (s *Server) sendGroupCallNotifications(ctx context.Context, txCallID, group
 			slog.Debug("group notify: member not registered, skip", "member", impu)
 			continue
 		}
-		go s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, reg)
+		s.sendRXInvite(context.Background(), txCallID, groupURI, initiatorURI, impu, audioPayload, reg)
 	}
 }
 
@@ -1116,7 +1141,6 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 
 	ch := make(chan *Message, 1)
 	s.pendingInvites.Store(callID, ch)
-	defer s.pendingInvites.Delete(callID)
 
 	host := strings.TrimSpace(s.cfg.Media.AdvertiseHost)
 	if host == "" {
@@ -1237,6 +1261,35 @@ func (s *Server) sendRXInvite(ctx context.Context, txCallID, groupURI, initiator
 	// transaction layer and still owns dialog-level handling.
 	s.sendTransacted(ctx, transport, target, branch, "INVITE", []byte(inviteMsg))
 
+	// The INVITE is on the wire; everything from here on depends only on the
+	// member's response and runs detached so the caller can proceed to answer
+	// the originator (TS 24.379 clause 10.1.1.4.2 step 14 g v orders member
+	// invitations before the originating leg's final response).
+	go s.completeRXLeg(ctx, ch, rxLegContext{
+		callID: callID, txCallID: txCallID, groupURI: groupURI,
+		initiatorURI: initiatorURI, memberImpu: memberImpu, localTag: localTag,
+		target: target, transport: transport,
+		audioPort: audioPort, rtcpPort: rtcpPort, sdpBody: sdpBody,
+	})
+}
+
+// rxLegContext carries what the asynchronous half of an RX leg needs from the
+// synchronous build.
+type rxLegContext struct {
+	callID, txCallID, groupURI  string
+	initiatorURI, memberImpu    string
+	localTag, target, transport string
+	audioPort, rtcpPort         int
+	sdpBody                     string
+}
+
+func (s *Server) completeRXLeg(ctx context.Context, ch chan *Message, leg rxLegContext) {
+	callID, txCallID, groupURI := leg.callID, leg.txCallID, leg.groupURI
+	initiatorURI, memberImpu := leg.initiatorURI, leg.memberImpu
+	localTag, target, transport := leg.localTag, leg.target, leg.transport
+	audioPort, rtcpPort, sdpBody := leg.audioPort, leg.rtcpPort, leg.sdpBody
+	_ = initiatorURI
+	defer s.pendingInvites.Delete(callID)
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	var resp *Message
@@ -1978,23 +2031,39 @@ func groupURIFromInvite(msg *Message) string {
 	return ""
 }
 
-func (s *Server) admitGroupInvite(ctx context.Context, initiatorURI, groupURI string) (bool, int, string) {
+// admitGroupInvite applies TS 24.379 clause 10.1.1.4.2 step 14 to an
+// originating leg: affiliation to the group first (step 14 a, clause 6.3.6,
+// warning "120"), then authorisation to initiate (step 14 b, warning "119").
+// Group membership stands in for the initiate authorisation of clause 6.3.5.4
+// until group documents carry per-user authorisation rules.
+func (s *Server) admitGroupInvite(ctx context.Context, initiatorURI, groupURI string) admissionVerdict {
 	if strings.TrimSpace(groupURI) == "" || s.st == nil {
-		return true, 0, ""
+		return admissionVerdict{Admitted: true}
 	}
 	userID, groupID, ok := s.userGroupIDs(ctx, initiatorURI, groupURI)
 	if !ok {
-		return false, 403, "Forbidden"
+		return admissionVerdict{Status: 403, Reason: "Forbidden",
+			Warning: "120 user is not affiliated to this group"}
+	}
+	affiliated, err := s.st.IsGroupAffiliated(ctx, userID, groupID)
+	if err != nil {
+		slog.Error("group INVITE affiliation lookup failed", "err", err, "user_id", userID, "group_id", groupID)
+		return admissionVerdict{Status: 500, Reason: "Server Internal Error"}
+	}
+	if !affiliated {
+		return admissionVerdict{Status: 403, Reason: "Forbidden",
+			Warning: "120 user is not affiliated to this group"}
 	}
 	member, err := s.st.IsGroupMember(ctx, userID, groupID)
 	if err != nil {
 		slog.Error("group INVITE membership lookup failed", "err", err, "user_id", userID, "group_id", groupID)
-		return false, 500, "Server Internal Error"
+		return admissionVerdict{Status: 500, Reason: "Server Internal Error"}
 	}
 	if !member {
-		return false, 403, "Forbidden"
+		return admissionVerdict{Status: 403, Reason: "Forbidden",
+			Warning: "119 user is not authorised to initiate the group call"}
 	}
-	return true, 0, ""
+	return admissionVerdict{Admitted: true}
 }
 
 type sdpInfo struct {
@@ -2652,6 +2721,19 @@ func (s *Server) advertisedSIPURI(transport string) string {
 		port = 5060
 	}
 	return fmt.Sprintf("sip:%s:%d;transport=%s", host, port, tp)
+}
+
+// allocateSessionIdentity mints the MCPTT session identity for a group
+// session (TS 24.379 clause 4.5): a SIP URI unique to the session, hosted at
+// the controlling function, carried to the client in the Contact of the final
+// response. It deliberately contains no MCPTT ID or group ID, which clause
+// 4.5 forbids when sensitive-data protection applies. A GRUU per RFC 5627
+// requires the IMS core's cooperation; until the AS sits behind one, the URI
+// is self-allocated at the advertised host.
+func (s *Server) allocateSessionIdentity(callID string) string {
+	uri := fmt.Sprintf("sip:mcptt-session-%s@%s", newToken(), advertiseHostOnly(s.cfg))
+	s.sessionIdentities.Store(callID, uri)
+	return uri
 }
 
 func (s *Server) recordRouteURI(transport string) string {
