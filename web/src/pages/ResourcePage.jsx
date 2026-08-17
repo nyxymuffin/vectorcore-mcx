@@ -1,9 +1,12 @@
 import React, { useCallback, useMemo, useState } from 'react'
 import { Edit3, Plus, RefreshCw, Trash2, XCircle } from 'lucide-react'
 import Badge from '../components/Badge.jsx'
+import DiscardConfirm from '../components/DiscardConfirm.jsx'
 import Modal from '../components/Modal.jsx'
 import Spinner from '../components/Spinner.jsx'
 import { useToast } from '../components/Toast.jsx'
+import { useConfirmClose } from '../hooks/useConfirmClose.js'
+import { useDirtyState } from '../hooks/useDirtyState.js'
 import { usePoller } from '../hooks/usePoller.js'
 
 export default function ResourcePage({ title, subtitle, emptyIcon, fields, columns, listFn, createFn, updateFn, deleteFn, defaults, filterFn }) {
@@ -125,9 +128,10 @@ function renderCell(row, col) {
 
 function EditModal({ title, initial, fields, createFn, updateFn, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState({ ...initial })
+  const [form, setForm, dirty] = useDirtyState({ ...initial })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const submit = useCallback(async e => {
     e.preventDefault()
@@ -149,7 +153,7 @@ function EditModal({ title, initial, fields, createFn, updateFn, onClose, onSave
   }, [createFn, form, onSaved, toast, updateFn])
 
   return (
-    <Modal title={title} onClose={onClose} size="lg">
+    <Modal title={title} onClose={guardedClose} size="lg" closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={submit}>
         <div className="modal-body">
           {fields.map(field => (
@@ -177,6 +181,7 @@ function EditModal({ title, initial, fields, createFn, updateFn, onClose, onSave
           <button type="submit" className="btn btn-primary" disabled={submitting}>{submitting ? <Spinner size="sm" /> : null} Save</button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
